@@ -35,6 +35,14 @@ class FakeMmc {
         set(value) {
             disc = value?.let { FakeDisc.forProfile(it) }
         }
+    /** READ CD 返回大端 CD-DA（模拟少数按大端输出的光驱）。 */
+    var bigEndianAudio = false
+    /** 模拟不支持 DAP 位的光驱（READ CD 带 DAP 时返回 5/24/00）。 */
+    var rejectDap = false
+    /** 收到的 SET CD SPEED 读取速度（kB/s）。 */
+    val speedRequests = mutableListOf<Int>()
+    /** READ CD 成功读出的扇区总数。 */
+    var cdSectorsRead = 0L
     var becomingReadyPolls = 0
     val pendingUnitAttention = ArrayDeque<Pair<Int, Int>>()
     val pendingMediaEvents = ArrayDeque<Int>()
@@ -97,6 +105,11 @@ class FakeMmc {
             0xA4 -> if ((cdb[10].toInt() and 0x3F) == 0x08) good(rpcState, allocation12(cdb)) else check(0x5, 0x24, 0x00)
             0xBD -> good(mechanismStatus(), allocation12(cdb))
             0x25, 0x51, 0x52, 0x43, 0xAD, 0xAC -> notReady() ?: mediaCommand(op, cdb)
+            0xBE -> notReady() ?: readCd(cdb)
+            0xBB -> {
+                speedRequests += ((cdb[2].toInt() and 0xFF) shl 8) or (cdb[3].toInt() and 0xFF)
+                Reply(Reply.GOOD)
+            }
             else -> check(0x5, 0x20, 0x00)
         }
     }
@@ -167,7 +180,7 @@ class FakeMmc {
         val body = when (format) {
             0 -> {
                 val start = maxOf(1, cdb[6].toInt() and 0xFF)
-                val entries = d.tracks.filter { it.number >= start }.map { tocEntry(it.number, if (it.audio) 0x10 else 0x14, it.startLba, msf) } +
+                val entries = d.tracks.filter { it.number >= start }.map { tocEntry(it.number, control(it), it.startLba, msf) } +
                     tocEntry(0xAA, 0x14, d.leadOutLba, msf)
                 byteArrayOf(d.tracks.first().number.toByte(), d.tracks.last().number.toByte()) + entries.fold(ByteArray(0)) { a, e -> a + e }
             }
@@ -186,14 +199,81 @@ class FakeMmc {
                     entries += fullTocEntry(s, ctrl, 0xA0, ts.first().number, 0x00, 0)
                     entries += fullTocEntry(s, ctrl, 0xA1, ts.last().number, 0, 0)
                     entries += msfEntry(s, ctrl, 0xA2, end)
-                    ts.forEach { t -> entries += msfEntry(s, if (t.audio) 0x10 else 0x14, t.number, t.startLba) }
+                    ts.forEach { t -> entries += msfEntry(s, control(t), t.number, t.startLba) }
                 }
                 byteArrayOf(d.sessions.first().toByte(), d.sessions.last().toByte()) + entries.fold(ByteArray(0)) { a, e -> a + e }
+            }
+            5 -> {
+                val packs = d.cdTextPacks ?: return check(0x5, 0x24, 0x00)
+                return good(CdTextBuilder.response(packs), allocation10(cdb))
             }
             else -> return check(0x5, 0x24, 0x00)
         }
         val len = body.size
         return good(byteArrayOf((len shr 8).toByte(), len.toByte()) + body, allocation10(cdb))
+    }
+
+    /** ADR 1 + 控制位：音频 0h（预加重 1h），数据 4h。 */
+    private fun control(t: FakeTrack): Int = if (t.audio) (if (t.preEmphasis) 0x11 else 0x10) else 0x14
+
+    /**
+     * READ CD：只支持 CD-DA（期望扇区类型 0 或 1，字节 9 含用户数据位）。音频内容是确定的正弦波，
+     * 第 N 轨频率 220×N Hz，左声道 sin、右声道 cos，振幅 6000，方便测试检查字节序和连续性。
+     */
+    private fun readCd(cdb: ByteArray): Reply {
+        val d = disc!!
+        val type = (cdb[1].toInt() shr 2) and 0x07
+        val dap = (cdb[1].toInt() and 0x02) != 0
+        if (dap && rejectDap) return check(0x5, 0x24, 0x00)
+        if ((cdb[9].toInt() and 0x10) == 0) return check(0x5, 0x24, 0x00)
+        val lba = (((cdb[2].toInt() and 0xFF) shl 24) or ((cdb[3].toInt() and 0xFF) shl 16) or ((cdb[4].toInt() and 0xFF) shl 8) or (cdb[5].toInt() and 0xFF)).toLong()
+        val count = ((cdb[6].toInt() and 0xFF) shl 16) or ((cdb[7].toInt() and 0xFF) shl 8) or (cdb[8].toInt() and 0xFF)
+        val out = ByteArray(count * 2352)
+        for (i in 0 until count) {
+            val sector = lba + i
+            val track = d.tracks.firstOrNull { sector >= it.startLba && sector < it.startLba + it.sectors } ?: return check(0x5, 0x21, 0x00)
+            if (!track.audio || (type != 0 && type != 1)) return check(0x5, 0x64, 0x00)
+            if (sector in d.badSectors) return check(0x3, 0x11, 0x05)
+            fillAudio(out, i * 2352, sector, track.number)
+        }
+        cdSectorsRead += count
+        return good(out, out.size)
+    }
+
+    /** 测试用：当前盘片 [lba] 起 [count] 个扇区"应该"读到的小端 PCM（不考虑坏扇区）。 */
+    fun expectedAudio(lba: Long, count: Int): ByteArray {
+        val d = disc!!
+        val out = ByteArray(count * 2352)
+        val saved = bigEndianAudio
+        bigEndianAudio = false
+        for (i in 0 until count) {
+            val sector = lba + i
+            val track = d.tracks.first { sector >= it.startLba && sector < it.startLba + it.sectors }
+            fillAudio(out, i * 2352, sector, track.number)
+        }
+        bigEndianAudio = saved
+        return out
+    }
+
+    private fun fillAudio(out: ByteArray, offset: Int, sector: Long, track: Int) {
+        val w = 2 * Math.PI * 220.0 * track / 44_100.0
+        for (f in 0 until 588) {
+            val n = sector * 588 + f
+            val l = (6000 * kotlin.math.sin(w * n)).toInt()
+            val r = (6000 * kotlin.math.cos(w * n)).toInt()
+            putSample(out, offset + f * 4, l)
+            putSample(out, offset + f * 4 + 2, r)
+        }
+    }
+
+    private fun putSample(out: ByteArray, at: Int, v: Int) {
+        if (bigEndianAudio) {
+            out[at] = (v shr 8).toByte()
+            out[at + 1] = v.toByte()
+        } else {
+            out[at] = v.toByte()
+            out[at + 1] = (v shr 8).toByte()
+        }
     }
 
     private fun tocEntry(track: Int, adrCtrl: Int, lba: Long, msf: Boolean): ByteArray {

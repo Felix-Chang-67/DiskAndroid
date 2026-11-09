@@ -2,6 +2,7 @@ package io.github.felixchang67.diskandroid.diag
 
 import android.content.Context
 import io.github.felixchang67.diskandroid.AppContainer
+import io.github.felixchang67.diskandroid.core.cdda.formatMs
 import io.github.felixchang67.diskandroid.core.log.LogFormat
 
 /**
@@ -51,6 +52,16 @@ object Diagnostics {
                 line("  事件：")
                 s.events.value.forEach { line("    $it") }
             }
+            line()
+        }
+
+        container.player.state.value?.let { p ->
+            line("===== 音乐 CD 播放器 =====")
+            line(
+                "状态：${p.status.label}；" + (p.track?.let { "第 ${it.number} 轨「${it.title}」 ${formatMs(p.positionMs)} / ${formatMs(it.durationMs)}；" } ?: "") +
+                    "缓冲 ${p.bufferedMs} ms；静音扇区 ${p.badSectors}；字节序 ${p.byteOrder}；去加重 ${if (p.deemphasis) "开" else "关"}",
+            )
+            p.message?.let { line("消息：$it") }
             line()
         }
 

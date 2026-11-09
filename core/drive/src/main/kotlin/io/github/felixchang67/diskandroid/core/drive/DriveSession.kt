@@ -144,6 +144,13 @@ class DriveSession(
         message
     } ?: "光驱当前不可用"
 
+    /**
+     * 在会话的命令线程上执行一条读取命令（播放、抓轨用），与轮询串行，UNIT ATTENTION 照常处理。
+     * 返回 null 表示光驱不在线（已断开、已关闭或会话失败）；设备断开时会话状态同时变为 Disconnected。
+     * 命令仍要经过只读守卫。
+     */
+    suspend fun read(cmd: ScsiCommand): ScsiResult? = runCommand { exec(cmd) }
+
     private suspend fun <T> runCommand(block: suspend () -> T): T? {
         if (_state.value !is DriveState.Online) return null
         return withContext(dispatcher) {
@@ -219,7 +226,7 @@ class DriveSession(
         val (h, hd) = execIn(MmcCommands.getConfiguration(0, 0, 8))
         if (hd != null && hd.size >= 8) {
             val total = (FeatureList.parse(hd)?.dataLength ?: 4L) + 4
-            val alloc = minOf(total, 65_532L).toInt().let { it + (it and 1) }
+            val alloc = minOf((total + 3) / 4 * 4, 65_532L).toInt() // 4 字节对齐（见 DiscReader）
             val (r2, d2) = execIn(MmcCommands.getConfiguration(0, 0, maxOf(alloc, 8)))
             if (d2 != null) {
                 raw["GET CONFIGURATION"] = d2
@@ -235,7 +242,11 @@ class DriveSession(
         // N1.2 真机上用 256 字节分配长度时，桥接芯片发完 76 字节后 STALL 了一次（BOT 允许，但能避开就避开）。
         var capabilities: CapabilitiesPage? = null
         val (mh, mhd) = execIn(MmcCommands.modeSense10(0x2A, 8))
-        val modeTotal = if (mhd != null && mhd.size >= 2) ((((mhd[0].toInt() and 0xFF) shl 8) or (mhd[1].toInt() and 0xFF)) + 2).coerceIn(8, 1024) else 0
+        val modeTotal = if (mhd != null && mhd.size >= 2) {
+            ((((mhd[0].toInt() and 0xFF) shl 8) or (mhd[1].toInt() and 0xFF)) + 2 + 3) / 4 * 4
+        } else {
+            0
+        }.coerceIn(0, 1024)
         val (mr, md) = when {
             mhd == null -> mh to null
             modeTotal <= mhd.size -> mh to mhd

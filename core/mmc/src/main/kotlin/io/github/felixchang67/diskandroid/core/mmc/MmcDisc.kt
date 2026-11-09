@@ -253,8 +253,22 @@ class FullTocEntry(
     val pointLba: Long get() = Msf.toLba(pmin, psec, pframe)
 }
 
-class FullToc(val firstSession: Int, val lastSession: Int, val entries: List<FullTocEntry>) {
+/**
+ * READ TOC 格式 0010b（完整 TOC，Q 子通道原样）。
+ * @property discarded 解析时丢弃的无效条目数（区段号越界、TNO 非 0、POINT/时间超出范围）。
+ *   N1.3 真机上桥接芯片在奇数分配长度下把后半段数据传错过，所以这里逐条校验，不让坏条目影响后面的计算。
+ */
+class FullToc(val firstSession: Int, val lastSession: Int, val entries: List<FullTocEntry>, val discarded: Int = 0) {
     val sessions: List<Int> get() = entries.map { it.session }.distinct().sorted()
+
+    /** A0h–A1h 声明的轨道里，完整 TOC 中找不到对应 POINT 的轨道号。 */
+    fun missingTracks(session: Int): List<Int> {
+        val first = firstTrack(session) ?: return emptyList()
+        val last = lastTrack(session) ?: return emptyList()
+        if (first !in 1..99 || last !in first..99) return emptyList()
+        val present = entries.filter { it.session == session && it.adr == 1 }.map { it.point }.toSet()
+        return (first..last).filter { it !in present }
+    }
 
     private fun point(session: Int, point: Int) = entries.firstOrNull { it.session == session && it.adr == 1 && it.point == point }
 
@@ -274,10 +288,13 @@ class FullToc(val firstSession: Int, val lastSession: Int, val entries: List<Ful
             if (n < 4) return null
             val b = Bytes(data, n)
             val end = minOf(n, b.be16(0) + 2)
+            val firstSession = b.u8(2)
+            val lastSession = b.u8(3)
             val entries = mutableListOf<FullTocEntry>()
+            var discarded = 0
             var pos = 4
             while (pos + 11 <= end) {
-                entries += FullTocEntry(
+                val entry = FullTocEntry(
                     session = b.u8(pos),
                     adr = b.u8(pos + 1) shr 4,
                     control = b.u8(pos + 1) and 0x0F,
@@ -290,9 +307,28 @@ class FullToc(val firstSession: Int, val lastSession: Int, val entries: List<Ful
                     psec = b.u8(pos + 9),
                     pframe = b.u8(pos + 10),
                 )
+                if (isValid(entry, firstSession, lastSession)) entries += entry else discarded++
                 pos += 11
             }
-            return FullToc(b.u8(2), b.u8(3), entries)
+            return FullToc(firstSession, lastSession, entries, discarded)
+        }
+
+        /**
+         * 导入区 Q 子通道只有 Mode-1（ADR 1：A0/A1/A2 与各轨道起点）和 Mode-5（ADR 5：B0/C0 等多区段指针），
+         * TNO 恒为 0；时间字段在 READ TOC 里已转换成二进制（秒 < 60，帧 < 75）。
+         */
+        fun isValid(e: FullTocEntry, firstSession: Int, lastSession: Int): Boolean {
+            if (e.session < 1 || e.session < firstSession || e.session > lastSession) return false
+            if (e.tno != 0) return false
+            return when (e.adr) {
+                1 -> when (e.point) {
+                    in 0x01..0x63, 0xA2 -> e.psec < 60 && e.pframe < 75
+                    0xA0, 0xA1 -> e.pmin in 1..99
+                    else -> false
+                }
+                5 -> true
+                else -> false
+            }
         }
     }
 }

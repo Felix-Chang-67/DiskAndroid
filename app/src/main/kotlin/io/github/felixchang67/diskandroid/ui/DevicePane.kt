@@ -89,6 +89,9 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onReconnect = { vm.reconnect(d.deviceName) },
                 onEject = { vm.eject(d.deviceName) },
                 onRefresh = { vm.refreshDrive(d.deviceName) },
+                discExtras = { session, disc ->
+                    if (disc.hasAudio) CdPlayerSection(session, disc, vm.player) { track -> vm.playTrack(d.deviceName, track) }
+                },
             )
         }
         if (detached.isNotEmpty()) {
@@ -111,13 +114,14 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：盘片信息（容量、TOC、轨道、盘片结构）", style = MaterialTheme.typography.titleMedium)
-            Text("1. 依次放入手头各种盘：音乐 CD、CD-ROM / CD-R、DVD（视频或数据）、DVD±R、BD。等显示“就绪”后会自动读取盘片信息。")
-            Text("2. 看“盘片信息”：类型、容量、状态、轨道列表（CD）、DVD 地区和是否加密、BD 类型、最高读速，和你知道的情况对一对。")
-            Text("3. 有加强版 CD（音轨 + 数据）或追加写过的 CD-R / DVD±R 更好，可以检查多区段。")
-            Text("4. 全部测完后点“导出日志（zip）”发给我（日志里有每张盘的完整信息），或者每张盘各点一次“复制诊断信息”。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：音乐 CD 播放（CD-TEXT 日文曲名）", style = MaterialTheme.typography.titleMedium)
+            Text("1. 放入日本的音乐 CD（专辑、单曲都行；最好有一张带 CD-TEXT 的）。就绪后下方会出现“音乐 CD”卡片和曲目列表。")
+            Text("2. 看专辑名、艺人、曲名是否正确显示日文（没有 CD-TEXT 的盘显示 Track 1、Track 2…）。")
+            Text("3. 点曲目播放；试试 暂停 / 继续、上一首 / 下一首、拖动进度条；锁屏、息屏后是否继续播放；通知栏和锁屏上的控制按钮。")
+            Text("4. 播放时拔掉耳机应自动暂停；播放中按光驱弹出键或拔掉光驱，App 应立即停止且不卡死。有划痕的盘可以测读错时的静音处理。")
+            Text("5. 测完点“导出日志（zip）”发给我。")
             Text(
-                "本版本只发送白名单里的只读命令，不读取盘片内容本身，不会写盘，也不会修改地区码。",
+                "本版本只发送白名单里的只读命令（新增 READ CD 读音频、SET CD SPEED 播放时降速），不会写盘，也不会修改地区码。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -161,6 +165,7 @@ private fun DeviceCard(
     onReconnect: () -> Unit,
     onEject: () -> Unit,
     onRefresh: () -> Unit,
+    discExtras: @Composable (DriveSession, DiscInfo) -> Unit,
 ) {
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -184,7 +189,7 @@ private fun DeviceCard(
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     Text("正在连接光驱…")
                 }
-                drive != null -> DriveSection(drive.session, onEject, onRefresh, onReconnect)
+                drive != null -> DriveSection(drive.session, onEject, onRefresh, onReconnect, discExtras)
                 device.massStorage is MassStorageSelection.Selected -> {
                     if (report != null && !report.success) StatusLine(false, "连接失败，详情见下方 USB 连接详情")
                     Button(onClick = onReconnect) { Text("连接光驱") }
@@ -198,7 +203,13 @@ private fun DeviceCard(
 }
 
 @Composable
-private fun DriveSection(session: DriveSession, onEject: () -> Unit, onRefresh: () -> Unit, onReconnect: () -> Unit) {
+private fun DriveSection(
+    session: DriveSession,
+    onEject: () -> Unit,
+    onRefresh: () -> Unit,
+    onReconnect: () -> Unit,
+    discExtras: @Composable (DriveSession, DiscInfo) -> Unit,
+) {
     val state by session.state.collectAsStateWithLifecycle()
     val media by session.media.collectAsStateWithLifecycle()
     val info by session.info.collectAsStateWithLifecycle()
@@ -228,7 +239,10 @@ private fun DriveSection(session: DriveSession, onEject: () -> Unit, onRefresh: 
     }
     info?.rpc?.let { KeyValue("DVD 地区码", it.summary()) }
 
-    disc?.let { d -> DiscSection(d, info?.rpc) }
+    disc?.let { d ->
+        discExtras(session, d)
+        DiscSection(d, info?.rpc)
+    }
 
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         FilledTonalButton(onClick = onEject, enabled = state is DriveState.Online) { Text("弹出光盘") }

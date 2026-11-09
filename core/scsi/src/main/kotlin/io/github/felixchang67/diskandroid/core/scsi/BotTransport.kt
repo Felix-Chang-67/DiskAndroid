@@ -165,7 +165,7 @@ class BotTransport(
         val myTag = tag
         val dataIn = cmd.direction == DataDirection.IN
         val cbw = buildCbw(myTag, cmd.length, dataIn, lun, cmd.cdb)
-        if (!cmd.quiet) log.data(LogLevel.VERBOSE, TAG, "CBW tag=$myTag", cbw)
+        if (!cmd.quiet && !cmd.streaming) log.data(LogLevel.VERBOSE, TAG, "CBW tag=$myTag", cbw)
 
         // 1. 命令阶段
         var t0 = io.nowMs()
@@ -222,7 +222,7 @@ class BotTransport(
             is CswRead.Ok -> r.bytes
             is CswRead.Error -> return Transaction.Failed(r.kind, r.detail, transferred)
         }
-        if (!cmd.quiet) log.data(LogLevel.VERBOSE, TAG, "CSW tag=$myTag", status)
+        if (!cmd.quiet && !cmd.streaming) log.data(LogLevel.VERBOSE, TAG, "CSW tag=$myTag", status)
 
         val signature = le32(status, 0)
         val cswTag = le32(status, 4)

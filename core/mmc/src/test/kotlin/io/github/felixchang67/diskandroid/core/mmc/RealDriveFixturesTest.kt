@@ -104,4 +104,38 @@ class RealDriveFixturesTest {
     fun currentProfileHeaderWithCd() {
         assertEquals(0x0008, FeatureList.parse(Hex.decode(CONFIG_HEADER_CD))?.currentProfile)
     }
+
+    /**
+     * N1.3 真机：READ TOC 格式 2 用奇数分配长度 147 时，桥接芯片只把前 128 字节传对，
+     * 后面是缓冲区里的旧数据（CSW 仍报告 GOOD、residue 0）。校验必须把坏条目挑出来。
+     */
+    @Test
+    fun corruptedFullTocFromN13IsDetected() {
+        val data = Hex.decode(
+            "00910101011000A000000000010000011000A1000000000A0000011000A200000000290E2501100001000000000002000110000200000000031E0201" +
+                "1000030000000007031C01100004000000000A1A4901100005000000000F044A011000060000000013182A011000070000000016323A011000080000" +
+                "00001C153B01100000000100001D0000001E080403000000001F08",
+        )
+        assertEquals(147, data.size)
+        val toc = assertNotNull(FullToc.parse(data))
+        assertEquals(2, toc.discarded)
+        assertEquals(listOf(1), toc.sessions) // 不再出现假的"区段 0"
+        assertEquals(185_437L, toc.leadOutLba(1))
+        assertEquals(1, toc.firstTrack(1))
+        assertEquals(10, toc.lastTrack(1))
+        assertEquals(listOf(9, 10), toc.missingTracks(1))
+    }
+
+    /** N1.3 真机 96 字节 INQUIRY：附加区里是字节对调的 ATA 型号，修订号只在长响应里出现。 */
+    @Test
+    fun fullInquiryRevealsDriveModel() {
+        val data = Hex.decode(
+            "058000325B00000042554646414C4F204F70746963616C204472697665202020424E3134303030303430304D4F414F43434931373432202000" +
+                "000000000000002D444552422034554E3020202020202020202020202020202020202020200000",
+        )
+        val inq = assertNotNull(InquiryData.parse(data))
+        assertEquals("BUFFALO", inq.vendor)
+        assertEquals("BN14", inq.revision)
+        assertEquals("D-RE BU40N", inq.ataString)
+    }
 }

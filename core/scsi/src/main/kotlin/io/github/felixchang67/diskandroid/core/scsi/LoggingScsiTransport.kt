@@ -18,6 +18,9 @@ class LoggingScsiTransport(
 ) : ScsiTransport {
     companion object {
         const val TAG = "SCSI"
+
+        /** 流式读取（播放、抓轨）成功时的精简日志用这个标签，方便内存日志面板过滤掉。 */
+        const val STREAM_TAG = "SCSI-STREAM"
         const val FULL_DATA_LIMIT = 4096
         const val PREVIEW_BYTES = 64
     }
@@ -46,6 +49,10 @@ class LoggingScsiTransport(
             suppressed.remove(key)?.let { n ->
                 log.v(TAG, "（之前省略了 $n 次结果相同的「${cmd.displayName}」轮询）")
             }
+        }
+        if (cmd.streaming && result is ScsiResult.Good) {
+            log.v(STREAM_TAG, "#$id ${cmd.displayName}  CDB=${Hex.compact(cmd.cdb)}  IN ${cmd.length}  GOOD ${result.transferred}  ${ms}ms")
+            return result
         }
         write(id, cmd, result, ms)
         return result

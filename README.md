@@ -9,17 +9,18 @@
 ## 文档
 
 - 开发计划、风险、测试节点：[`docs/PLAN.md`](docs/PLAN.md)
-- 当前测试节点说明：[`docs/testing/N1.3.md`](docs/testing/N1.3.md)（历史：[`N1.1`](docs/testing/N1.1.md)、[`N1.2`](docs/testing/N1.2.md)）
+- 当前测试节点说明：[`docs/testing/N1.5.md`](docs/testing/N1.5.md)（历史：[`N1.1`](docs/testing/N1.1.md)、[`N1.2`](docs/testing/N1.2.md)、[`N1.3`](docs/testing/N1.3.md)）
 
 ## 模块
 
 | 模块 | 说明 |
 |---|---|
-| `app` | Compose 界面、USB 插入入口、诊断信息与日志导出 |
+| `app` | Compose 界面、USB 插入入口、诊断信息与日志导出、音乐 CD 播放（AudioTrack、前台服务、MediaSession） |
 | `core:log` | 日志系统（纯 Kotlin）：内存环形缓冲、会话文件（.log / .jsonl）、hex dump |
 | `core:scsi` | SCSI 传输层（纯 Kotlin）：命令/结果类型、Bulk-Only Transport、sense 解析（T10 ASC/ASCQ 表）、命令 hex 日志、只读白名单守卫 |
-| `core:mmc` | MMC/SPC 命令构造与响应解析（INQUIRY、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、RPC……） |
-| `core:drive` | 光驱会话：单线程命令队列、盘片/托盘状态机、轮询、事件；盘片信息读取（容量、TOC、轨道、盘片结构） |
+| `core:mmc` | MMC/SPC 命令构造与响应解析（INQUIRY、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、RPC、READ CD、CD-TEXT……） |
+| `core:drive` | 光驱会话：单线程命令队列、盘片/托盘状态机、轮询、事件；盘片信息读取（容量、TOC、轨道、盘片结构、CD-TEXT） |
+| `core:cdda` | 音乐 CD 播放（纯 Kotlin）：READ CD 读取与重试 / 静音、字节序检测、去加重、播放引擎（缓冲、换轨、跳转） |
 | `core:testing` | 测试替身：模拟 MMC 光驱（FakeMmc）与可注入故障的 BOT 设备（FakeBotDevice） |
 | `core:usb` | USB 枚举、热插拔、权限、描述符解析、BOT 接口选择、连接与占用、Android bulkTransfer 适配 |
 | `native/diskcore` | usbfs ioctl 辅助（链路速度、内核驱动、CLEAR_HALT、RESET）；后续承载原生传输层 |

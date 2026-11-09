@@ -70,6 +70,7 @@ class DriveInfo(
         inquiry?.let {
             out += "光驱：${it.vendor} ${it.product}，固件 ${it.revision}" + (if (it.vendorSpecific.isNotEmpty()) "（${it.vendorSpecific}）" else "")
             out += "  外设类型 ${Hex.byte(it.deviceType)}h ${it.deviceTypeName()}，可移动介质 ${yes(it.removable)}，SPC 版本 ${it.version}"
+            if (it.ataString.isNotEmpty()) out += "  桥接芯片附加信息（ATA 字节序还原）：${it.ataString}"
         } ?: run { out += "光驱：INQUIRY 失败" }
         features?.let { f ->
             out += "  当前 profile：${Hex.word(f.currentProfile)}h ${MmcNames.profileName(f.currentProfile)}" + if (f.truncated) "（特性列表被截断）" else ""

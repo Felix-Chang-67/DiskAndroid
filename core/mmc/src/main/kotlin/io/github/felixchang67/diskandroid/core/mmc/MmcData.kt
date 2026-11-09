@@ -15,6 +15,11 @@ class InquiryData(
     val revision: String,
     /** 字节 36–55 的厂商自定义区（很多光驱在这里放固件日期），没有则为空。 */
     val vendorSpecific: String,
+    /**
+     * 字节 56 以后附加区里的文字，按 ATA 字符串的字节序（每 2 字节高低对调）还原。
+     * USB-SATA 桥接芯片常把机芯 IDENTIFY 里的型号原样放在这里（N1.3 真机："-DERB 4UN0" → "D-RE BU40N"）。
+     */
+    val ataString: String = "",
 ) {
     /** 外设类型 05h = CD/DVD 设备（MMC）。 */
     val isMmcDevice: Boolean get() = deviceType == 0x05
@@ -30,6 +35,20 @@ class InquiryData(
     }
 
     companion object {
+        private fun ataString(data: ByteArray, length: Int): String {
+            if (length <= 56) return ""
+            val chars = CharArray(length - 56) { ' ' }
+            var i = 56
+            while (i + 1 < length) {
+                chars[i - 56] = printable(data[i + 1])
+                chars[i - 55] = printable(data[i])
+                i += 2
+            }
+            return String(chars).trim().replace(Regex(" {2,}"), " ")
+        }
+
+        private fun printable(b: Byte): Char = (b.toInt() and 0xFF).let { if (it in 0x21..0x7E) it.toChar() else ' ' }
+
         fun parse(data: ByteArray, length: Int = data.size): InquiryData? {
             if (length < 5) return null
             val b = Bytes(data, minOf(length, data.size))
@@ -44,6 +63,7 @@ class InquiryData(
                 product = b.ascii(16, 16).trim(),
                 revision = b.ascii(32, 4).trim(),
                 vendorSpecific = b.ascii(36, 20).trim(),
+                ataString = ataString(data, minOf(length, data.size)),
             )
         }
     }

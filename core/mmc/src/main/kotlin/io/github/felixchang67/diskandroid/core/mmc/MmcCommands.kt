@@ -160,6 +160,58 @@ object MmcCommands {
     }
 
     /**
+     * READ TOC 格式 0101b：导入区 CD-TEXT 数据包。CDB 与 libburn（MMC_GET_LEADTEXT = 43 02 05 …）、
+     * libcdio（mmc_read_cdtext）一致，字节 1 置 MSF 位。光驱要读导入区，给更长的超时（libcdio 同样放宽了超时）。
+     */
+    fun readCdText(allocation: Int): ScsiCommand {
+        require(allocation in 4..0xFFFF)
+        val cdb = ByteArray(10)
+        cdb[0] = 0x43
+        cdb[1] = 0x02
+        cdb[2] = 0x05
+        cdb[7] = (allocation shr 8).toByte()
+        cdb[8] = allocation.toByte()
+        return ScsiCommand.dataIn(cdb, allocation, "READ TOC（格式 5 CD-TEXT）", timeoutMs = 20_000)
+    }
+
+    /**
+     * READ CD（BEh）读 CD-DA 扇区，每扇区 [CDDA_SECTOR_SIZE] 字节，读进调用方的缓冲区。
+     * 字段与 libburn mmc_read_cd、libcdio mmc_read_cd、Linux cdrom_read_block 一致：
+     * 字节 1 = 期望扇区类型 001b（CD-DA）<< 2，DAP 位（bit 1）要求光驱对无法纠正的音频数据做静音/插值掩盖；
+     * 字节 2–5 = 起始 LBA；字节 6–8 = 扇区数；字节 9 = 10h（只要用户数据，CD-DA 即整个 2352 字节）；字节 10 = 0（不要子通道）。
+     */
+    fun readCdda(lba: Long, blocks: Int, buffer: ByteArray, offset: Int, dap: Boolean, timeoutMs: Int = 20_000): ScsiCommand {
+        require(blocks in 1..0xFFFF)
+        val cdb = ByteArray(12)
+        cdb[0] = 0xBE.toByte()
+        cdb[1] = ((1 shl 2) or (if (dap) 0x02 else 0)).toByte()
+        putBe32(cdb, 2, lba)
+        cdb[6] = (blocks shr 16).toByte()
+        cdb[7] = (blocks shr 8).toByte()
+        cdb[8] = blocks.toByte()
+        cdb[9] = 0x10
+        return ScsiCommand.streamIn(cdb, buffer, offset, blocks * CDDA_SECTOR_SIZE, "READ CD（CD-DA）", timeoutMs)
+    }
+
+    /**
+     * SET CD SPEED（BBh）。字节 2–3 = 读取速度（kB/s），字节 4–5 = 写入速度，FFFFh = 光驱最大值（MMC；libburn mmc_set_speed 同）。
+     * 只调整主轴转速，不改动盘片，也不是持久设置（换盘/复位后恢复）。
+     */
+    fun setCdSpeed(readKBps: Int): ScsiCommand {
+        require(readKBps in 1..0xFFFF)
+        val cdb = ByteArray(12)
+        cdb[0] = 0xBB.toByte()
+        cdb[2] = (readKBps shr 8).toByte()
+        cdb[3] = readKBps.toByte()
+        cdb[4] = 0xFF.toByte()
+        cdb[5] = 0xFF.toByte()
+        return ScsiCommand.noData(cdb, "SET CD SPEED", timeoutMs = 10_000)
+    }
+
+    /** CD-DA 扇区大小：588 个立体声 16 位采样。 */
+    const val CDDA_SECTOR_SIZE = 2352
+
+    /**
      * READ DISC STRUCTURE（ADh）。与 Linux dvd_read_physical / dvd_read_copyright 一致：
      * 字节 1 = 介质类型（0 = DVD/HD DVD，1 = BD），字节 2–5 = 地址，字节 6 = 层号，字节 7 = 格式，字节 8–9 = 分配长度。
      * 阶段 1 不读取密钥类格式（只读守卫会拦截）。

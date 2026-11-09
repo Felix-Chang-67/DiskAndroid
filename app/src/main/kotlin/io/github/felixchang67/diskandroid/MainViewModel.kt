@@ -33,6 +33,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val reports: StateFlow<Map<String, ProbeReport>> = c.driveManager.reports
     val drives: StateFlow<Map<String, ActiveDrive>> = c.driveManager.drives
     val connecting: StateFlow<Set<String>> = c.driveManager.connecting
+    val player = c.player
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
@@ -75,6 +76,17 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     fun eject(deviceName: String) = c.driveManager.eject(deviceName)
 
     fun refreshDrive(deviceName: String) = c.driveManager.refresh(deviceName)
+
+    /** 播放这台光驱当前盘片的第 [track] 轨。 */
+    fun playTrack(deviceName: String, track: Int) {
+        val drive = c.driveManager.drives.value[deviceName]
+        val disc = drive?.session?.disc?.value
+        if (drive == null || disc == null) {
+            _messages.tryEmit("光驱或盘片已经不在了")
+            return
+        }
+        c.player.play(drive.session, disc, track)
+    }
 
     fun logSnapshot(): List<LogRecord> = c.ring.snapshot()
 

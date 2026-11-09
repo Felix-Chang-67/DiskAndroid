@@ -504,7 +504,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | N1.2 | 无盘 / 开托盘 / 依次放 CD、DVD、BD | 各一张 | 光驱信息页（INQUIRY、Profile、Feature、RPC 状态）+ 状态变化日志 |
 | N1.3 | 每种盘点"盘片信息" | 尽量多类型 | 盘片信息导出 |
 | N1.4 | 读一张 CD-ROM 和一张 DVD 成 ISO，在电脑上算 SHA-256 比对；读到一半拔线一次；读一张划痕盘；试 16 / 32 / 64 / 128 扇区块大小 | 最好有已知校验值的盘 | 速度、日志、坏扇区表、比对结果 |
-| N1.5 | 音乐 CD：切歌、暂停、拖动；划痕盘；播放中弹盘；播放中拔线 | 音乐 CD（带 CD-TEXT 更好）、混合模式盘（如有） | 听感（杂音 / 爆音 / 卡顿）+ 日志 |
+| N1.5 | 音乐 CD：切歌、暂停、拖动；划痕盘；播放中弹盘；播放中拔线 | 日本音乐 CD（带 CD-TEXT 更好；早期带预加重的盘、CCCD、加强版 CD 如有） | 曲名是否正确 + 听感（杂音 / 爆音 / 卡顿）+ 日志 |
 | N1.6 | 插盘自动播放；关闭自动播放；（可选）拔掉扩展坞电源复现掉线 | — | 提示是否出现 + 日志 |
 | N2.1 | 浏览各类数据盘，导出一个文件 | Joliet 中文名 CD-R、UDF DVD、BD-R | 目录截图 + 日志 |
 | N2.2 | 查看主片识别结果 | 自制 DVD-Video、自制 BDMV / AVCHD | 候选列表截图 |
@@ -556,6 +556,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | 5 | 解密组件产出 | 你没有电脑编译 → 由我在容器里**单独**编译成独立 .so 文件，**不进 APK**，在对话里单独发给你，你在 App 里用"导入组件"导入 |
 | 6 | 默认分支 | 仓库原本为空，`claude/jolly-tesla-c2qlm6` 已成为默认分支；以后想改成 `main` 告诉我 |
 | 7 | 包名 | `io.github.felixchang67.diskandroid` |
+| 8 | 日本盘优先（你在 N1.3 之后提出） | 你主要用日本发行的 CD / DVD / BD（音乐专辑、演唱会 DVD/BD、特典盘）→ 兼容性按日本盘优先（见 7.6）；**N1.5（音乐 CD 播放）提前到 N1.4（读成 ISO）之前** |
 
 ### 7.2 进度
 
@@ -563,7 +564,8 @@ N4.x + N1.5 → N5.1 / N5.2
 |---|---|---|---|---|
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
 | 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
-| 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | 等待真机测试 |
+| 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | ✅ 真机通过（见 7.5） |
+| 2026-11-09 | N1.5（提前） | 0.4.0-N1.5（versionCode 4） | 音乐 CD 播放：READ CD（CD-DA，2352 字节/扇区）按块读取，整块重试 → 逐扇区重试 → 读不出的扇区静音并记录，每块 6 秒时间预算（划伤盘不卡死）；盘被取出 / 光驱断开立即停止；导入区 CD-TEXT（READ TOC 格式 5）：CRC 校验、双字节、TAB 省略、多语言块，**日文块优先，MS-JIS 用 windows-31j 解码，字符集标错的日本盘自动按 Shift-JIS 回退**；字节序自动检测（思路同 cdparanoia）+ 手动切换；预加重音轨做 50/15 µs 去加重（SoX deemph 参数，按定义逐点验证误差 < 0.07 dB）；播放时 SET CD SPEED 降到约 4 倍速，停止后恢复；AudioTrack 非阻塞输出、约 4 秒缓冲、跨轨无缝；上一首 / 下一首 / 暂停 / 拖动；音频焦点、拔耳机暂停、唤醒锁；前台服务 + MediaSession（通知栏 / 锁屏 / 蓝牙按键）。顺带修 N1.3：分配长度 4 字节对齐、完整 TOC 逐条校验、音乐 CD 显示时长、解出桥接芯片里的机芯型号 | 等待真机测试 |
 
 ### 7.3 N1.1 真机结果（2026-11-09）
 
@@ -587,3 +589,33 @@ N4.x + N1.5 → N5.1 / N5.2
 - GESN 正常（媒体事件 + 托盘状态）。就绪用时：CD 14.3 s，DVD 5.6 s，BD 7.8 s。
 - BOT：405 条命令，1 次 STALL，0 超时，0 复位。STALL 出现在 MODE SENSE（分配 256、实际 76 字节）：桥接芯片发完短数据后 STALL bulk-in，再发 CSW（residue 176）——这是 BOT 规范允许的"Hi > Di"处理方式，已按规范清 HALT 并重读 CSW。N1.3 起变长响应先读头再按确切长度读，避开这一步。
 - 问题（N1.3 已修）：一次开/关托盘记两条事件；Removable Medium 特性的 Lock 位被误显示为"已锁定"（实为"支持锁定"）。
+
+### 7.5 N1.3 真机结果（2026-11-10，会话 session-20261110-002621）
+
+- **光驱机芯确认**：完整 96 字节 INQUIRY 的附加区里有字节对调的 ATA 型号 "-DERB 4UN0" → **HL-DT-ST BD-RE BU40N**（Ultra Slim 机芯），固件 **BN14**（只在长响应里出现）。
+- 三张盘全部读出，无错误：
+  - 音乐 CD：10 轨、41:13，单区段，lead-out LBA 185437；
+  - 日本 DVD：DVD-ROM 单层（数据约 2.0 GB），**CSS 加密，2 区**（与光驱地区 2 一致，可以播放）；
+  - BD-ROM：23.88 GB，类型 "BDO"。
+- GET PERFORMANCE：CD 24x；**DVD / BD 视频盘只报 2 倍速**——光驱固件对视频盘的读速限制（riplock），播放够用；以后读成 ISO 会比较慢（按 2 倍速算，满容量单层 DVD 约半小时，25 GB 的 BD 约 45 分钟）。
+- **发现一个桥接芯片的问题**：READ TOC 格式 2（完整 TOC）用奇数分配长度 147 时，只有前 128 字节正确，后面是缓冲区里的旧数据（CSW 却报告成功、residue 0），于是轨道 9、10 丢失，还冒出一个假的"区段 0"。其余响应（92、34、36、492、76 字节…）都是 4 的倍数或较短，没有问题。
+  - N1.5 起：所有变长读取的分配长度向上取 4 的倍数（Linux libata 对 ATAPI 也做同样的补齐），只取声明长度内的字节；完整 TOC 逐条校验（区段号、TNO、POINT、时间范围），丢弃坏条目并提示缺少哪些轨道；CD-TEXT 每包有 CRC。
+  - 这次的回放测试用的就是这 147 字节原始数据。
+- 其他小修：音乐 CD 的"容量"按 2048 字节/块算会误导，改为显示时长与 CD-DA 数据量；诊断信息里超长的原始响应（BD DI 4100 字节）只显示前 1 KB。
+
+### 7.6 日本盘兼容（你在 N1.3 之后提出的优先事项）
+
+| 盘 | 要点 | 处理 | 节点 |
+|---|---|---|---|
+| 音乐 CD | CD-TEXT 多为日文块（MS-JIS 双字节）+ 英文 / 罗马字块 | 日文块优先，windows-31j 解码（含 ①、Ⅱ、～ 等 Windows 扩展字符）；字符集标成 ISO-8859-1 但内容其实是 Shift-JIS 的盘自动回退；英文块作为副标题 | N1.5 ✅ 已实现 |
+| 音乐 CD | 1980 年代的 CD 常有**预加重**（TOC 控制位） | 按轨道控制位做 50/15 µs 去加重，可在设置里关闭 | N1.5 ✅ |
+| 音乐 CD | 2002–2004 年的 **CCCD**（防复制 CD，例如 avex、东芝 EMI） | 本质是故意带错误的多区段盘：用光驱的 CD-DA 读取 + 坏扇区静音处理，播放不会卡死；如果你手里有，请测一下 | N1.5 测试 |
+| 音乐 CD | 加强版 CD（Enhanced CD，音轨 + 电脑数据） | 只播放第 1 区段音轨，按区段 lead-out 截止 | N1.5 ✅ |
+| 音乐 CD | SACD 混合盘 | 光驱只能读 CD 层，按普通 CD 播放 | — |
+| DVD | 日本是 **2 区**，你的光驱也是 2 区 | 直接可读（N1.3 已确认）；不修改地区码 | P3 |
+| 演唱会 DVD | 音频多为 **LPCM**（无损）、AC-3、DTS | Media3 自带 LPCM；AC-3 / DTS 用 FFmpeg 音频解码器（P2 的 FFmpeg 构建包含 DTS） | P2 / P3 |
+| 演唱会 BD | 音频多为 **LPCM、Dolby TrueHD、DTS-HD MA**；视频常为 1080i | FFmpeg 音频解码器解 TrueHD / DTS-HD MA；1080i 需要去隔行，P2 起评估 | P2 / P3 |
+| BD | 日本是 **A 区**；BD 地区由播放器（软件）判断，不是光驱 | libbluray 的播放器地区设为 A、语言默认日语（PSR 20 / 16 / 17） | P3 |
+| 商业 DVD / BD | 基本都有 CSS / AACS；BD+ 在日本盘上很少见 | 按原计划：外部解密组件 + 边读边播，不导出解密内容 | P3 |
+| 特典盘 | 常见是 DVD-Video、BDMV 或电脑数据盘（ISO9660 / UDF，日文文件名） | P2 文件浏览按 Joliet / UDF 处理日文文件名；ISO9660 原始文件名按 Shift-JIS 回退显示 | P2 |
+

@@ -1,7 +1,7 @@
 package io.github.felixchang67.diskandroid.core.testing
 
 /** 模拟盘片的一条轨道。 */
-data class FakeTrack(val number: Int, val session: Int, val startLba: Long, val sectors: Long, val audio: Boolean)
+data class FakeTrack(val number: Int, val session: Int, val startLba: Long, val sectors: Long, val audio: Boolean, val preEmphasis: Boolean = false)
 
 /**
  * 模拟盘片：profile、轨道、lead-out，以及 DVD/BD 的盘片结构。数值按 MMC 布局编码，给 FakeMmc 回答
@@ -22,16 +22,29 @@ class FakeDisc(
     /** BD：DI 里的盘片类型标识。 */
     val bdTypeId: String = "BDO",
     val readSpeedKBps: Int = 4234,
+    /** 导入区 CD-TEXT 数据包（不含 4 字节头），null 表示没有 CD-TEXT。 */
+    val cdTextPacks: ByteArray? = null,
+    /** READ CD 读到这些 LBA 时返回介质错误（3/11/05）。 */
+    val badSectors: Set<Long> = emptySet(),
 ) {
     val sessions: List<Int> get() = tracks.map { it.session }.distinct().sorted()
 
     companion object {
         /** 纯音乐 CD：每轨 [secondsPerTrack] 秒。 */
-        fun audioCd(trackCount: Int = 3, secondsPerTrack: Int = 180): FakeDisc {
+        fun audioCd(
+            trackCount: Int = 3,
+            secondsPerTrack: Int = 180,
+            cdText: ByteArray? = null,
+            badSectors: Set<Long> = emptySet(),
+            preEmphasisTracks: Set<Int> = emptySet(),
+        ): FakeDisc {
             val tracks = (1..trackCount).map { n ->
-                FakeTrack(n, 1, (n - 1) * secondsPerTrack * 75L, secondsPerTrack * 75L, audio = true)
+                FakeTrack(n, 1, (n - 1) * secondsPerTrack * 75L, secondsPerTrack * 75L, audio = true, preEmphasis = n in preEmphasisTracks)
             }
-            return FakeDisc(0x0008, tracks, trackCount * secondsPerTrack * 75L, blockLength = 2352, readSpeedKBps = 4234)
+            return FakeDisc(
+                0x0008, tracks, trackCount * secondsPerTrack * 75L, blockLength = 2352, readSpeedKBps = 4234,
+                cdTextPacks = cdText, badSectors = badSectors,
+            )
         }
 
         /** CD-Extra：第 1 区段 2 首音轨，第 2 区段 1 条数据轨（中间隔 11400 扇区）。 */

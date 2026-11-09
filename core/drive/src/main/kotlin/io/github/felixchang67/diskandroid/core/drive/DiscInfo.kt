@@ -2,7 +2,9 @@ package io.github.felixchang67.diskandroid.core.drive
 
 import io.github.felixchang67.diskandroid.core.log.DiskLog
 import io.github.felixchang67.diskandroid.core.log.Hex
+import io.github.felixchang67.diskandroid.core.log.LogLevel
 import io.github.felixchang67.diskandroid.core.mmc.BdDiscInformation
+import io.github.felixchang67.diskandroid.core.mmc.CdText
 import io.github.felixchang67.diskandroid.core.mmc.DiscInformation
 import io.github.felixchang67.diskandroid.core.mmc.DvdCopyright
 import io.github.felixchang67.diskandroid.core.mmc.DvdPhysical
@@ -35,6 +37,10 @@ class DiscInfo(
     val raw: Map<String, ByteArray>,
     val errors: Map<String, String>,
     val readMillis: Long,
+    /** 导入区 CD-TEXT（只有含音轨的 CD 才读）。 */
+    val cdText: CdText? = null,
+    /** 没有 CD-TEXT 时的说明（例如"盘上没有 CD-TEXT"），有 CD-TEXT 时为 null。 */
+    val cdTextNote: String? = null,
 ) {
     val family: MmcNames.DiscFamily get() = MmcNames.family(profile)
     val audioTracks: List<TocEntry> get() = toc?.tracks?.filter { !it.isData }.orEmpty()
@@ -58,9 +64,23 @@ class DiscInfo(
         return next.lba - entry.lba
     }
 
+    /** 音乐 CD 的总时长与 CD-DA 数据量（每扇区 2352 字节）。 */
+    fun audioDescription(): String {
+        val sectors = audioTracks.sumOf { sectorsOf(it) ?: 0L }
+        return "${Msf.duration(sectors)}（$sectors 扇区，CD-DA ${formatBytes(sectors * 2352)}）"
+    }
+
+    /** CD-TEXT 里的专辑标题 / 演出者（优先日文块）。 */
+    val albumTitle: String? get() = cdText?.title(0)
+    val albumPerformer: String? get() = cdText?.performer(0)
+
+    /** 轨道显示名：CD-TEXT 标题，没有则为"Track N"。 */
+    fun trackTitle(track: Int): String = cdText?.title(track) ?: "Track $track"
+
     fun summary(): String {
         val parts = mutableListOf(MmcNames.profileName(profile))
-        capacity?.let { parts += formatBytes(it.bytes) }
+        albumTitle?.let { parts += "「$it」" }
+        if (hasAudio) parts += audioDescription() else capacity?.let { parts += formatBytes(it.bytes) }
         if (family == MmcNames.DiscFamily.CD) {
             toc?.let { parts += "${it.tracks.size} 轨（音频 ${audioTracks.size}，数据 ${dataTracks.size}）" }
         }
@@ -73,7 +93,8 @@ class DiscInfo(
         val out = mutableListOf<String>()
         out += "盘片：${MmcNames.profileName(profile)}（profile ${Hex.word(profile)}h），读取盘片信息用时 $readMillis ms"
         capacity?.let {
-            out += "  容量：${it.blocks} 块 × ${it.blockLength} 字节 = ${formatBytes(it.bytes)}（最后 LBA ${it.lastLba}）"
+            out += "  容量：${it.blocks} 块 × ${it.blockLength} 字节 = ${formatBytes(it.bytes)}（最后 LBA ${it.lastLba}）" +
+                if (hasAudio) "；音频部分 ${audioDescription()}" else ""
         }
         discInformation?.let { d ->
             out += "  盘片状态：${d.discStatusName()}，最后区段${d.lastSessionStateName()}，可擦写 ${yes(d.erasable)}，" +
@@ -82,15 +103,19 @@ class DiscInfo(
         }
         sessionInfo?.let { out += "  区段信息：第 ${it.firstSession}–${it.lastSession} 区段，最后区段首轨 ${it.firstTrackInLastSession}，起点 LBA ${it.lastSessionStartLba}" }
         fullToc?.let { f ->
+            if (f.discarded > 0) out += "  ⚠ 完整 TOC 有 ${f.discarded} 条无效条目已忽略（多半是桥接芯片的传输问题）"
             f.sessions.forEach { s ->
                 out += "  完整 TOC 区段 $s：轨道 ${f.firstTrack(s) ?: "?"}–${f.lastTrack(s) ?: "?"}，lead-out LBA ${f.leadOutLba(s) ?: "?"}" +
                     (f.discTypeCode(s)?.let { "，盘片类型码 ${Hex.byte(it)}h" } ?: "")
+                f.missingTracks(s).takeIf { it.isNotEmpty() }?.let { out += "  ⚠ 完整 TOC 区段 $s 缺少轨道 ${it.joinToString("、")}" }
             }
         }
         toc?.let { t ->
             out += "  TOC：轨道 ${t.firstTrack}–${t.lastTrack}，lead-out LBA ${t.leadOut?.lba ?: "?"}"
             trackLines().forEach { out += "    $it" }
         }
+        cdText?.let { c -> c.describeLines().forEach { out += "  $it" } }
+        cdTextNote?.let { out += "  CD-TEXT：$it" }
         dvdPhysical?.let { p ->
             out += "  DVD 物理格式：${p.bookTypeName()}（版本 ${p.partVersion}），${p.discSizeName()}，${p.layers} 层" +
                 (if (p.layers > 1) if (p.oppositeTrackPath) "（OTP）" else "（PTP）" else "") +
@@ -121,16 +146,21 @@ class DiscInfo(
             "四声道".takeIf { e.fourChannel },
         ).joinToString("、")
         "轨道 ${"%02d".format(e.track)}  ${kind.padEnd(4)}  起点 LBA ${e.lba}（${Msf.format(e.lba)}）  长度 $length" +
-            (info?.let { "  区段 ${it.session}" } ?: "") + (if (flags.isNotEmpty()) "  [$flags]" else "")
+            (info?.let { "  区段 ${it.session}" } ?: "") + (if (flags.isNotEmpty()) "  [$flags]" else "") +
+            (cdText?.title(e.track)?.let { "  「$it」" } ?: "")
     }
 
     fun rawLines(): List<String> = raw.flatMap { (name, bytes) ->
-        listOf("  $name（${bytes.size} 字节）：") + Hex.dump(bytes).lines().map { "    $it" }
+        val shown = minOf(bytes.size, RAW_DUMP_LIMIT)
+        listOf("  $name（${bytes.size} 字节${if (shown < bytes.size) "，只显示前 $shown 字节" else ""}）：") +
+            Hex.dump(bytes, 0, shown).lines().map { "    $it" }
     }
 
     private fun yes(b: Boolean) = if (b) "是" else "否"
 
     companion object {
+        const val RAW_DUMP_LIMIT = 1024
+
         fun formatBytes(bytes: Long): String = when {
             bytes >= 1_000_000_000 -> "%.2f GB".format(bytes / 1e9)
             bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1e6)
@@ -169,6 +199,12 @@ internal class DiscReader(
                 ?.let { SessionInfo.parse(it) }
             fullToc = variable("READ TOC 格式 2", 4, 2, 4096) { MmcCommands.readToc(2, msf = true, trackOrSession = 0, allocation = it) }
                 ?.let { FullToc.parse(it) }
+            fullToc?.let { f ->
+                val missing = f.sessions.associateWith { f.missingTracks(it) }.filterValues { it.isNotEmpty() }
+                if (f.discarded > 0 || missing.isNotEmpty()) {
+                    log.w("DISC", "完整 TOC 数据不一致，已忽略无效条目", "无效条目" to f.discarded, "缺少的轨道" to missing)
+                }
+            }
         }
 
         val tracks = mutableListOf<TrackInformation>()
@@ -209,12 +245,53 @@ internal class DiscReader(
             performance = fixed("GET PERFORMANCE", MmcCommands.getReadPerformance(minOf(count, 32)))?.let { ReadPerformance.parse(it) } ?: performance
         }
 
+        var cdText: CdText? = null
+        var cdTextNote: String? = null
+        if (family == MmcNames.DiscFamily.CD && toc?.tracks.orEmpty().any { !it.isData }) {
+            val result = readCdText()
+            cdText = result.first
+            cdTextNote = result.second
+        }
+
         val info = DiscInfo(
             profile, capacity, discInformation, toc, sessionInfo, fullToc, tracks, dvdPhysical, dvdCopyright, bdInfo, performance,
-            raw.toMap(), errors.toMap(), clock() - t0,
+            raw.toMap(), errors.toMap(), clock() - t0, cdText, cdTextNote,
         )
         info.describeLines().forEach { log.i("DISC", it) }
         return info
+    }
+
+    /**
+     * 读导入区 CD-TEXT：先读 4 字节头拿到长度，再按长度（4 字节对齐）读全部数据包。
+     * 盘上没有 CD-TEXT 时光驱通常返回 5/24/00 或只有头部，这不算错误。
+     */
+    private fun readCdText(): Pair<CdText?, String?> {
+        val key = "READ TOC 格式 5（CD-TEXT）"
+        val t0 = clock()
+        val (r1, d1) = execIn(MmcCommands.readCdText(4))
+        if (d1 == null) {
+            log.i("DISC", "CD-TEXT：光驱没有返回数据", "结果" to describe(r1), "耗时ms" to clock() - t0)
+            return null to "盘上没有 CD-TEXT（${describe(r1)}）"
+        }
+        val declared = if (d1.size >= 2) (((d1[0].toInt() and 0xFF) shl 8) or (d1[1].toInt() and 0xFF)) + 2 else 0
+        if (declared <= 4 + 17) {
+            raw[key] = d1
+            return null to "盘上没有 CD-TEXT"
+        }
+        val total = minOf(declared, CD_TEXT_MAX)
+        val (r2, d2) = execIn(MmcCommands.readCdText(alignAllocation(total, CD_TEXT_MAX)))
+        if (d2 == null) {
+            errors[key] = describe(r2)
+            return null to "读取失败（${describe(r2)}）"
+        }
+        raw[key] = d2
+        val data = if (d2.size > total) d2.copyOf(total) else d2
+        // 诊断用：完整的数据包写进日志文件（SCSI 日志对 4 KB 以上的数据只记前 64 字节）
+        log.data(LogLevel.DEBUG, "DISC", "CD-TEXT 原始数据（${data.size} 字节，${(data.size - 4) / CdText.PACK_SIZE} 个包）", data, "耗时ms" to clock() - t0)
+        val parsed = CdText.parseResponse(data)
+        if (parsed == null) return null to "数据包无法解析（${data.size} 字节）"
+        if (parsed.crcErrors > 0) log.w("DISC", "CD-TEXT 有 ${parsed.crcErrors} 个包 CRC 错误，已丢弃", "总包数" to parsed.packCount)
+        return parsed to null
     }
 
     private fun fixed(key: String, cmd: ScsiCommand, keepRaw: Boolean = true): ByteArray? {
@@ -249,14 +326,24 @@ internal class DiscReader(
             raw[key] = d1
             return d1.copyOf(total)
         }
-        val (r2, d2) = execIn(build(total))
+        // 分配长度向上取 4 的倍数：N1.3 真机上奇数长度（147 字节的完整 TOC）只传对了前 128 字节，
+        // 其余是桥接芯片缓冲区里的旧数据（CSW 仍报告成功）。Linux libata 对 ATAPI 也把传输长度补齐到 4 字节。
+        val (r2, d2) = execIn(build(alignAllocation(total, maxAlloc)))
         if (d2 == null) {
             errors[key] = describe(r2)
             raw[key] = d1
             return d1
         }
         raw[key] = d2
-        return d2
+        // 补齐出来的字节不属于响应
+        return if (d2.size > total) d2.copyOf(total) else d2
+    }
+
+    private fun alignAllocation(length: Int, maxAlloc: Int): Int = minOf((length + 3) / 4 * 4, maxOf(maxAlloc / 4 * 4, 4))
+
+    private companion object {
+        /** 8 个块 × 256 个包 × 18 字节 + 4 字节头（libburn / libcdio 同样以此为上限）。 */
+        const val CD_TEXT_MAX = 4 + 18 * 2048
     }
 
     private fun describe(r: ScsiResult): String = when (r) {

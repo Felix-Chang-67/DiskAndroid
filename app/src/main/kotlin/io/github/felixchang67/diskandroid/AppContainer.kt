@@ -5,6 +5,7 @@ import io.github.felixchang67.diskandroid.core.log.DiskLog
 import io.github.felixchang67.diskandroid.core.log.FileLogSink
 import io.github.felixchang67.diskandroid.core.log.LogTags
 import io.github.felixchang67.diskandroid.core.log.RingBufferSink
+import io.github.felixchang67.diskandroid.core.scsi.LoggingScsiTransport
 import io.github.felixchang67.diskandroid.core.usb.UsbDeviceMonitor
 import io.github.felixchang67.diskandroid.core.usb.UsbDriveConnector
 import io.github.felixchang67.diskandroid.diag.ExitReasons
@@ -12,6 +13,7 @@ import io.github.felixchang67.diskandroid.diag.PreviousSession
 import io.github.felixchang67.diskandroid.diag.SystemInfo
 import io.github.felixchang67.diskandroid.drive.DriveManager
 import io.github.felixchang67.diskandroid.log.LogcatSink
+import io.github.felixchang67.diskandroid.player.CdPlaybackController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,7 +28,7 @@ class AppContainer(val app: Application) {
     val logDir: File = (app.getExternalFilesDir("logs") ?: File(app.filesDir, "logs")).apply { mkdirs() }
 
     val log = DiskLog()
-    val ring = RingBufferSink(capacity = 8000)
+    val ring = RingBufferSink(capacity = 8000) { it.tag != LoggingScsiTransport.STREAM_TAG }
     val fileSink = FileLogSink(logDir, sessionId)
 
     /** 主线程作用域：光驱会话管理的状态都在这里修改。 */
@@ -35,6 +37,7 @@ class AppContainer(val app: Application) {
     val usbMonitor: UsbDeviceMonitor
     val usbConnector: UsbDriveConnector
     val driveManager: DriveManager
+    val player: CdPlaybackController
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
     var previousSessionIssues: PreviousSession.Issues? = null
@@ -48,6 +51,7 @@ class AppContainer(val app: Application) {
         usbMonitor = UsbDeviceMonitor(app, log)
         usbConnector = UsbDriveConnector(usbMonitor.usbManager, log)
         driveManager = DriveManager(usbMonitor, usbConnector, log, mainScope)
+        player = CdPlaybackController(app, log, mainScope)
     }
 
     fun start() {

@@ -12,6 +12,8 @@ enum class DataDirection { NONE, IN, OUT }
  * @property name 命令名（只用于日志）。
  * @property quiet 轮询类命令：结果和上一次相同时不重复写日志。
  * @property sensitive 载荷涉及密钥（阶段 3 的认证命令）：日志里不输出数据内容。
+ * @property streaming 高频数据读取（播放、抓轨）：成功时只记一行精简日志（CDB、长度、结果、耗时，不含数据和 CBW/CSW），
+ *   失败时照常完整记录（sense 原始 hex + 解码）。
  */
 class ScsiCommand(
     val cdb: ByteArray,
@@ -23,6 +25,7 @@ class ScsiCommand(
     val name: String = "",
     val quiet: Boolean = false,
     val sensitive: Boolean = false,
+    val streaming: Boolean = false,
 ) {
     init {
         require(cdb.size in 6..16) { "CDB 长度必须在 6..16 之间（实际 ${cdb.size}）" }
@@ -47,6 +50,10 @@ class ScsiCommand(
 
         fun dataIn(cdb: ByteArray, length: Int, name: String, timeoutMs: Int = DEFAULT_TIMEOUT_MS, quiet: Boolean = false) =
             ScsiCommand(cdb, DataDirection.IN, ByteArray(length), 0, length, timeoutMs, name, quiet)
+
+        /** 读入调用方提供的缓冲区（避免高频读取时反复分配大数组）。 */
+        fun streamIn(cdb: ByteArray, buffer: ByteArray, offset: Int, length: Int, name: String, timeoutMs: Int) =
+            ScsiCommand(cdb, DataDirection.IN, buffer, offset, length, timeoutMs, name, streaming = true)
     }
 }
 

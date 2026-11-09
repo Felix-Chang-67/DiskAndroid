@@ -23,12 +23,12 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // 每个测试节点递增 versionCode，保证可以直接覆盖安装。
-        versionCode = 3
-        versionName = "0.3.0-N1.3"
+        versionCode = 4
+        versionName = "0.4.0-N1.5"
 
         buildConfigField("String", "GIT_SHA", "\"$gitSha${if (gitDirty) "+dirty" else ""}\"")
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
-        buildConfigField("String", "TEST_NODE", "\"N1.3\"")
+        buildConfigField("String", "TEST_NODE", "\"N1.5\"")
 
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -85,6 +85,7 @@ dependencies {
     implementation(project(":core:log"))
     implementation(project(":core:usb"))
     implementation(project(":core:drive"))
+    implementation(project(":core:cdda"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
@@ -99,6 +100,7 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
 
+    testImplementation(project(":core:testing"))
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
