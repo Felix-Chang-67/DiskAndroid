@@ -13,6 +13,7 @@ import io.github.felixchang67.diskandroid.diag.PreviousSession
 import io.github.felixchang67.diskandroid.diag.SystemInfo
 import io.github.felixchang67.diskandroid.drive.DriveManager
 import io.github.felixchang67.diskandroid.log.LogcatSink
+import io.github.felixchang67.diskandroid.meta.MetadataManager
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ class AppContainer(val app: Application) {
     val usbConnector: UsbDriveConnector
     val driveManager: DriveManager
     val player: CdPlaybackController
+    val metadata: MetadataManager
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
     var previousSessionIssues: PreviousSession.Issues? = null
@@ -52,6 +54,7 @@ class AppContainer(val app: Application) {
         usbConnector = UsbDriveConnector(usbMonitor.usbManager, log)
         driveManager = DriveManager(usbMonitor, usbConnector, log, mainScope)
         player = CdPlaybackController(app, log, mainScope)
+        metadata = MetadataManager(app, log, mainScope)
     }
 
     fun start() {
@@ -61,6 +64,7 @@ class AppContainer(val app: Application) {
         previousSessionIssues = runCatching { PreviousSession.extract(logDir, sessionId) }.getOrNull()
         usbMonitor.start()
         driveManager.start()
+        metadata.start(driveManager.drives)
     }
 
     /** 未捕获异常先写进日志并同步落盘，再交给系统默认处理（弹"已停止运行"）。 */

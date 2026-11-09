@@ -208,6 +208,23 @@ object MmcCommands {
         return ScsiCommand.noData(cdb, "SET CD SPEED", timeoutMs = 10_000)
     }
 
+    /**
+     * READ SUB-CHANNEL（42h）格式 02h：媒体目录号 MCN（即商品条码 UPC / EAN / JAN）。
+     * CDB 与 Linux sr_get_mcn、libcdio mmc_read_subchannel 一致：字节 2 = 40h（SubQ，要子通道数据），
+     * 字节 3 = 02h，分配长度 24（4 字节头 + 20 字节数据，libcdio 注明 MMC-4 表 424 / 431 / 432）。
+     * 光驱要在子通道里找 MCN，可能要零点几秒到一两秒。
+     */
+    fun readMcn(): ScsiCommand {
+        val cdb = ByteArray(10)
+        cdb[0] = 0x42
+        cdb[2] = 0x40
+        cdb[3] = 0x02
+        cdb[8] = SUBCHANNEL_LENGTH.toByte()
+        return ScsiCommand.dataIn(cdb, SUBCHANNEL_LENGTH, "READ SUB-CHANNEL（MCN 条码）", timeoutMs = 10_000)
+    }
+
+    const val SUBCHANNEL_LENGTH = 24
+
     /** CD-DA 扇区大小：588 个立体声 16 位采样。 */
     const val CDDA_SECTOR_SIZE = 2352
 

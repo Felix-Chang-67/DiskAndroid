@@ -57,7 +57,7 @@ class CdPlayerUiTest {
             val disc = requireNotNull(session.disc.value) { "盘片信息没有读出来" }
 
             compose.setContent {
-                CdPlayerSection(session, disc, container.player) { track -> container.player.play(session, disc, track) }
+                CdPlayerSection(session, disc, container.player, container.metadata) { track -> container.player.play(session, disc, track) }
             }
             compose.onNodeWithText("テスト・アルバム").assertExists()
             compose.onNodeWithText("夏の歌～ライブ").assertExists()

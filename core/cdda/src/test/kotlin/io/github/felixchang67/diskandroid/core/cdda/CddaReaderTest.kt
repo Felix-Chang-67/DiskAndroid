@@ -97,4 +97,29 @@ class CddaReaderTest {
         assertIs<CddaReader.Result.Stop>(result)
         assertEquals(CddaReader.StopReason.DRIVE_GONE, result.reason)
     }
+
+    @Test
+    fun transportErrorRereadsChunkWithoutSilencingGoodData() = runTest {
+        val mmc = fake(FakeDisc.audioCd(trackCount = 1, secondsPerTrack = 20))
+        val transport = FakeMmcTransport(mmc)
+        var now = 0L
+        var failNext = 1
+        val r = CddaReader(
+            { cmd ->
+                if (failNext-- > 0) {
+                    now += 6_014 // 真机上一次复位恢复耗时约 6 秒
+                    io.github.felixchang67.diskandroid.core.scsi.ScsiResult.TransportError(
+                        0, io.github.felixchang67.diskandroid.core.scsi.TransportErrorKind.IO_ERROR, "数据阶段 I/O 错误：ENOMEM",
+                    )
+                } else {
+                    transport.execute(cmd)
+                }
+            },
+            log, budgetMs = 6_000, clock = { now }, sleep = {},
+        )
+        val buf = ByteArray(24 * SECTOR_BYTES)
+        assertEquals(CddaReader.Result.Ok, r.read(864, 24, buf))
+        assertContentEquals(mmc.expectedAudio(864, 24), buf)
+        assertEquals(2, r.commands)
+    }
 }

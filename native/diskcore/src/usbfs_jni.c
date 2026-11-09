@@ -7,12 +7,15 @@
  *   - USBDEVFS_GETDRIVER          某接口当前绑定的内核驱动（usb-storage / uas / usbfs）
  *   - USBDEVFS_CLEAR_HALT         清端点 STALL，并由内核复位主机侧 data toggle（BOT 错误恢复要用）
  *   - USBDEVFS_RESET              端口复位（最后手段）
+ *   - USBDEVFS_BULK               批量传输，失败时返回 -errno（公开 API 的 bulkTransfer 只返回 -1，
+ *                                 分不清 STALL、超时、内存不足、babble……）
  *
  * 约定：返回 int 的函数 >= 0 表示成功，< 0 表示 -errno。
  */
 #include <errno.h>
 #include <jni.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <linux/usbdevice_fs.h>
@@ -21,7 +24,39 @@
 
 JNIEXPORT jstring JNICALL JNI_FN(nativeVersion)(JNIEnv *env, jclass clazz) {
     (void) clazz;
-    return (*env)->NewStringUTF(env, "diskcore-usbfs/1");
+    return (*env)->NewStringUTF(env, "diskcore-usbfs/2");
+}
+
+/*
+ * 一次批量传输（USBDEVFS_BULK）。endpoint 的 bit7 表示方向（IN）。
+ * 用用户态临时缓冲区中转，不在阻塞的 ioctl 期间持有 Java 数组（不影响 GC）。
+ * 返回实际传输的字节数；失败返回 -errno（EPIPE = STALL，ETIMEDOUT = 超时，ENODEV = 断开，ENOMEM……）。
+ */
+JNIEXPORT jint JNICALL JNI_FN(nativeBulk)(JNIEnv *env, jclass clazz, jint fd, jint endpoint,
+                                          jbyteArray buffer, jint offset, jint length, jint timeout_ms) {
+    (void) clazz;
+    if (offset < 0 || length < 0 || timeout_ms < 0) return -EINVAL;
+    jsize capacity = (*env)->GetArrayLength(env, buffer);
+    if ((jlong) offset + (jlong) length > (jlong) capacity) return -EINVAL;
+    int is_in = (endpoint & 0x80) != 0;
+    void *tmp = malloc(length > 0 ? (size_t) length : 1u);
+    if (tmp == NULL) return -ENOMEM;
+    if (!is_in && length > 0) (*env)->GetByteArrayRegion(env, buffer, offset, length, (jbyte *) tmp);
+
+    struct usbdevfs_bulktransfer bulk;
+    memset(&bulk, 0, sizeof(bulk));
+    bulk.ep = (unsigned int) endpoint;
+    bulk.len = (unsigned int) length;
+    bulk.timeout = (unsigned int) timeout_ms;
+    bulk.data = tmp;
+    int r = ioctl(fd, USBDEVFS_BULK, &bulk);
+    int err = errno;
+    if (r > 0 && is_in) {
+        if (r > length) r = length;
+        (*env)->SetByteArrayRegion(env, buffer, offset, r, (const jbyte *) tmp);
+    }
+    free(tmp);
+    return r < 0 ? -err : r;
 }
 
 JNIEXPORT jint JNICALL JNI_FN(nativeGetSpeed)(JNIEnv *env, jclass clazz, jint fd) {

@@ -1,0 +1,557 @@
+{
+ "releases": [
+  {
+   "quality": "normal",
+   "id": "16843e39-5453-4f97-8321-ac7da3ed4ad8",
+   "date": "2016-02-24",
+   "status": "Official",
+   "media": [
+    {
+     "discs": [
+      {
+       "offset-count": 10,
+       "id": "beyzshJLWsTuHOEnc1BtgGwQoW0-",
+       "sectors": 185587,
+       "offsets": [
+        150,
+        15752,
+        31753,
+        47023,
+        67874,
+        87342,
+        102808,
+        127634,
+        147802,
+        162040
+       ]
+      }
+     ],
+     "tracks": [
+      {
+       "length": 208026,
+       "number": "1",
+       "id": "835d0905-1f40-4066-8393-39da64f9fea8",
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "name": "ヒトリエ",
+         "artist": {
+          "type": "Group",
+          "sort-name": "hitorie",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "name": "ヒトリエ"
+         }
+        }
+       ],
+       "recording": {
+        "id": "8623da9c-7e2f-4e7f-90d2-1d2ae7bee2bb",
+        "first-release-date": "2016-02-24",
+        "disambiguation": "",
+        "length": 208026,
+        "title": "GO BACK TO VENUSFORT",
+        "video": false,
+        "artist-credit": [
+         {
+          "joinphrase": "",
+          "name": "ヒトリエ",
+          "artist": {
+           "country": "JP",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "name": "ヒトリエ",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": "",
+           "type": "Group",
+           "sort-name": "hitorie"
+          }
+         }
+        ]
+       },
+       "position": 1,
+       "title": "GO BACK TO VENUSFORT"
+      },
+      {
+       "number": "2",
+       "id": "03a6c91d-6778-434c-9bfd-368498bb195a",
+       "length": 213346,
+       "title": "シャッタードール",
+       "position": 2,
+       "recording": {
+        "length": 213347,
+        "disambiguation": "",
+        "video": false,
+        "artist-credit": [
+         {
+          "artist": {
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP",
+           "name": "ヒトリエ",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": "",
+           "type": "Group",
+           "sort-name": "hitorie"
+          },
+          "name": "ヒトリエ",
+          "joinphrase": ""
+         }
+        ],
+        "title": "シャッタードール",
+        "id": "c3fcdfeb-868a-4990-8c32-c278d1e7b2f0",
+        "first-release-date": "2016-02-24"
+       },
+       "artist-credit": [
+        {
+         "name": "ヒトリエ",
+         "artist": {
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "country": "JP",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "name": "ヒトリエ",
+          "type": "Group",
+          "sort-name": "hitorie"
+         },
+         "joinphrase": ""
+        }
+       ]
+      },
+      {
+       "artist-credit": [
+        {
+         "artist": {
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "name": "ヒトリエ",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "type": "Group",
+          "sort-name": "hitorie"
+         },
+         "name": "ヒトリエ",
+         "joinphrase": ""
+        }
+       ],
+       "position": 3,
+       "title": "ワンミーツハー",
+       "recording": {
+        "disambiguation": "",
+        "length": 205000,
+        "title": "ワンミーツハー",
+        "artist-credit": [
+         {
+          "name": "ヒトリエ",
+          "artist": {
+           "country": "JP",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "name": "ヒトリエ",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": "",
+           "type": "Group",
+           "sort-name": "hitorie"
+          },
+          "joinphrase": ""
+         }
+        ],
+        "video": false,
+        "id": "f46c99fc-6aef-4fd6-baba-be8cda2e1d6d",
+        "first-release-date": "2016-01-27"
+       },
+       "number": "3",
+       "id": "7118994f-a1e0-4c49-88dd-0063a84ea42c",
+       "length": 203600
+      },
+      {
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "name": "ヒトリエ",
+         "artist": {
+          "country": "JP",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "name": "ヒトリエ",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "type": "Group",
+          "sort-name": "hitorie"
+         }
+        }
+       ],
+       "title": "Swipe, Shrink",
+       "position": 4,
+       "recording": {
+        "title": "Swipe, Shrink",
+        "video": false,
+        "artist-credit": [
+         {
+          "joinphrase": "",
+          "name": "ヒトリエ",
+          "artist": {
+           "disambiguation": "",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "name": "ヒトリエ",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP",
+           "sort-name": "hitorie",
+           "type": "Group"
+          }
+         }
+        ],
+        "disambiguation": "",
+        "length": 278013,
+        "first-release-date": "2016-02-24",
+        "id": "3196971a-64c9-4578-b357-81678a682f83"
+       },
+       "number": "4",
+       "id": "21144dd9-1d77-4d38-8232-f7b2260da689",
+       "length": 278013
+      },
+      {
+       "id": "a0aed809-1db7-4d68-ba5a-79e01312ea39",
+       "number": "5",
+       "length": 259573,
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "artist": {
+          "name": "ヒトリエ",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "disambiguation": "",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "sort-name": "hitorie",
+          "type": "Group"
+         },
+         "name": "ヒトリエ"
+        }
+       ],
+       "position": 5,
+       "title": "トーキーダンス",
+       "recording": {
+        "first-release-date": "2015-07-01",
+        "id": "fd8b7110-f9cc-4c01-b83f-16aa1788b5fb",
+        "video": false,
+        "artist-credit": [
+         {
+          "joinphrase": "",
+          "name": "ヒトリエ",
+          "artist": {
+           "sort-name": "hitorie",
+           "type": "Group",
+           "disambiguation": "",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "name": "ヒトリエ",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP"
+          }
+         }
+        ],
+        "title": "トーキーダンス",
+        "length": 260000,
+        "disambiguation": ""
+       }
+      },
+      {
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "name": "ヒトリエ",
+         "artist": {
+          "name": "ヒトリエ",
+          "country": "JP",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "disambiguation": "",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "sort-name": "hitorie",
+          "type": "Group"
+         }
+        }
+       ],
+       "recording": {
+        "length": 206213,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "ヒトリエ",
+          "artist": {
+           "type": "Group",
+           "sort-name": "hitorie",
+           "country": "JP",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "name": "ヒトリエ",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": ""
+          },
+          "joinphrase": ""
+         }
+        ],
+        "video": false,
+        "title": "輪郭",
+        "id": "fc67ed42-adf3-447b-92b4-70fca5769327",
+        "first-release-date": "2016-02-24"
+       },
+       "position": 6,
+       "title": "輪郭",
+       "length": 206213,
+       "id": "ec0142fa-d098-47b0-af54-19d6bda05538",
+       "number": "6"
+      },
+      {
+       "number": "7",
+       "id": "bfc014e6-758a-456e-8676-b61c344f78fe",
+       "length": 331013,
+       "title": "フユノ",
+       "position": 7,
+       "recording": {
+        "video": false,
+        "artist-credit": [
+         {
+          "artist": {
+           "sort-name": "hitorie",
+           "type": "Group",
+           "name": "ヒトリエ",
+           "country": "JP",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "disambiguation": "",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b"
+          },
+          "name": "ヒトリエ",
+          "joinphrase": ""
+         }
+        ],
+        "title": "フユノ",
+        "length": 331013,
+        "disambiguation": "",
+        "first-release-date": "2016-02-24",
+        "id": "3769169f-2d9a-4ee5-8fc2-153131417551"
+       },
+       "artist-credit": [
+        {
+         "artist": {
+          "disambiguation": "",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "name": "ヒトリエ",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "sort-name": "hitorie",
+          "type": "Group"
+         },
+         "name": "ヒトリエ",
+         "joinphrase": ""
+        }
+       ]
+      },
+      {
+       "number": "8",
+       "id": "e9285610-8e82-4049-ab32-0c7fe9299679",
+       "length": 268906,
+       "position": 8,
+       "title": "バスタブと夢遊",
+       "recording": {
+        "artist-credit": [
+         {
+          "artist": {
+           "sort-name": "hitorie",
+           "type": "Group",
+           "disambiguation": "",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "name": "ヒトリエ",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP"
+          },
+          "name": "ヒトリエ",
+          "joinphrase": ""
+         }
+        ],
+        "video": false,
+        "title": "バスタブと夢遊",
+        "length": 268907,
+        "disambiguation": "",
+        "first-release-date": "2016-02-24",
+        "id": "17f2c316-cbe1-44ee-8797-057df62d361a"
+       },
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "artist": {
+          "type": "Group",
+          "sort-name": "hitorie",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "country": "JP",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "name": "ヒトリエ"
+         },
+         "name": "ヒトリエ"
+        }
+       ]
+      },
+      {
+       "number": "9",
+       "id": "b3eb6de7-ce65-4322-83ec-555536879882",
+       "length": 189840,
+       "title": "後天症のバックビート",
+       "position": 9,
+       "recording": {
+        "length": 189840,
+        "disambiguation": "",
+        "video": false,
+        "artist-credit": [
+         {
+          "name": "ヒトリエ",
+          "artist": {
+           "type": "Group",
+           "sort-name": "hitorie",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP",
+           "name": "ヒトリエ",
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": ""
+          },
+          "joinphrase": ""
+         }
+        ],
+        "title": "後天症のバックビート",
+        "id": "e701627f-9cb0-44ce-85c4-e8665bbba076",
+        "first-release-date": "2016-02-24"
+       },
+       "artist-credit": [
+        {
+         "joinphrase": "",
+         "artist": {
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "name": "ヒトリエ",
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "type": "Group",
+          "sort-name": "hitorie"
+         },
+         "name": "ヒトリエ"
+        }
+       ]
+      },
+      {
+       "artist-credit": [
+        {
+         "name": "ヒトリエ",
+         "artist": {
+          "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+          "disambiguation": "",
+          "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+          "country": "JP",
+          "name": "ヒトリエ",
+          "type": "Group",
+          "sort-name": "hitorie"
+         },
+         "joinphrase": ""
+        }
+       ],
+       "position": 10,
+       "title": "MIRROR",
+       "recording": {
+        "video": false,
+        "artist-credit": [
+         {
+          "joinphrase": "",
+          "name": "ヒトリエ",
+          "artist": {
+           "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+           "disambiguation": "",
+           "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+           "country": "JP",
+           "name": "ヒトリエ",
+           "type": "Group",
+           "sort-name": "hitorie"
+          }
+         }
+        ],
+        "title": "MIRROR",
+        "length": 313960,
+        "disambiguation": "",
+        "first-release-date": "2016-02-24",
+        "id": "1847f7e7-8af6-4d69-a6a4-fdf852eaa9c4"
+       },
+       "id": "386247e0-d9eb-4641-b2f0-4ff68e66d34e",
+       "number": "10",
+       "length": 313960
+      }
+     ],
+     "title": "",
+     "id": "59715975-15a8-387e-81ff-fa0a7a14c376",
+     "format-id": "9712d52a-4509-3d4b-a1a2-67c88c643e31",
+     "track-offset": 0,
+     "track-count": 10,
+     "format": "CD",
+     "position": 1
+    }
+   ],
+   "disambiguation": "通常盤",
+   "barcode": "4547403043075",
+   "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+   "artist-credit": [
+    {
+     "name": "ヒトリエ",
+     "artist": {
+      "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+      "disambiguation": "",
+      "country": "JP",
+      "id": "8ab20881-8ea0-4891-a5a5-36f85246ae5b",
+      "name": "ヒトリエ",
+      "type": "Group",
+      "sort-name": "hitorie"
+     },
+     "joinphrase": ""
+    }
+   ],
+   "asin": null,
+   "packaging-id": "ec27701a-4a22-37f4-bfac-6616e0f9750a",
+   "cover-art-archive": {
+    "darkened": false,
+    "artwork": true,
+    "front": true,
+    "back": false,
+    "count": 1
+   },
+   "text-representation": {
+    "script": "Jpan",
+    "language": "jpn"
+   },
+   "packaging": "Jewel Case",
+   "country": "JP",
+   "release-events": [
+    {
+     "area": {
+      "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+      "name": "Japan",
+      "type-id": null,
+      "disambiguation": "",
+      "type": null,
+      "sort-name": "Japan",
+      "iso-3166-1-codes": [
+       "JP"
+      ]
+     },
+     "date": "2016-02-24"
+    }
+   ],
+   "title": "DEEPER"
+  }
+ ],
+ "offset-count": 10,
+ "sectors": 185587,
+ "id": "beyzshJLWsTuHOEnc1BtgGwQoW0-",
+ "offsets": [
+  150,
+  15752,
+  31753,
+  47023,
+  67874,
+  87342,
+  102808,
+  127634,
+  147802,
+  162040
+ ]
+}

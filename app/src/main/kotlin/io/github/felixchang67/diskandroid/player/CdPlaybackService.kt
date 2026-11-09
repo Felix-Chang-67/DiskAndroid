@@ -20,6 +20,8 @@ import io.github.felixchang67.diskandroid.MainActivity
 import io.github.felixchang67.diskandroid.R
 import io.github.felixchang67.diskandroid.core.cdda.PlayerState
 import io.github.felixchang67.diskandroid.core.log.DiskLog
+import io.github.felixchang67.diskandroid.meta.MetadataManager
+import io.github.felixchang67.diskandroid.meta.TrackNames
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
@@ -31,6 +33,7 @@ import kotlinx.coroutines.launch
  */
 class CdPlaybackService : Service() {
     private lateinit var controller: CdPlaybackController
+    private lateinit var metadata: MetadataManager
     private lateinit var log: DiskLog
     private lateinit var session: MediaSession
     private val scope = MainScope()
@@ -44,6 +47,7 @@ class CdPlaybackService : Service() {
         super.onCreate()
         val container = (application as DiskApp).container
         controller = container.player
+        metadata = container.metadata
         log = container.log
         createChannel()
         // 注意：MediaSession 自己也有 controller 属性，回调里用局部变量避免混淆
@@ -72,7 +76,9 @@ class CdPlaybackService : Service() {
             isActive = true
         }
         scope.launch {
-            combine(controller.current, controller.state) { c, s -> c to s }.collect { (c, s) -> render(c, s) }
+            // 在线识别结果或封面晚到时也要刷新通知栏 / 锁屏
+            combine(controller.current, controller.state, metadata.discs, metadata.covers) { c, s, _, _ -> c to s }
+                .collect { (c, s) -> render(c, s) }
         }
         log.i(TAG, "播放服务已启动")
     }
@@ -105,7 +111,9 @@ class CdPlaybackService : Service() {
             return
         }
         val track = s.track
-        val key = "${s.status}|${track?.number}"
+        val md = metadata.metadataFor(c.disc)
+        val art = md?.coverUrl?.let { metadata.covers.value[it] }
+        val key = "${s.status}|${track?.number}|${md?.savedAt}|${art != null}"
         val now = System.currentTimeMillis()
         val changed = key != lastKey
         if (changed) {
@@ -113,12 +121,14 @@ class CdPlaybackService : Service() {
             track?.let { t ->
                 session.setMetadata(
                     MediaMetadata.Builder()
-                        .putString(MediaMetadata.METADATA_KEY_TITLE, t.title)
-                        .putString(MediaMetadata.METADATA_KEY_ARTIST, t.performer ?: c.album.performer ?: "")
-                        .putString(MediaMetadata.METADATA_KEY_ALBUM, c.album.title ?: "音乐 CD")
+                        .putString(MediaMetadata.METADATA_KEY_TITLE, TrackNames.title(c.disc, md, t.number))
+                        .putString(MediaMetadata.METADATA_KEY_ARTIST, TrackNames.artist(c.disc, md, t.number) ?: "")
+                        .putString(MediaMetadata.METADATA_KEY_ALBUM, TrackNames.album(c.disc, md) ?: "音乐 CD")
+                        .putString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST, TrackNames.albumArtist(c.disc, md) ?: "")
                         .putLong(MediaMetadata.METADATA_KEY_DURATION, t.durationMs)
                         .putLong(MediaMetadata.METADATA_KEY_TRACK_NUMBER, t.number.toLong())
                         .putLong(MediaMetadata.METADATA_KEY_NUM_TRACKS, c.album.tracks.size.toLong())
+                        .apply { if (art != null) putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art) }
                         .build(),
                 )
             }
@@ -164,8 +174,14 @@ class CdPlaybackService : Service() {
     private fun buildNotification(c: CdPlaybackController.Current?, s: PlayerState?): Notification {
         val track = s?.track
         val playing = s?.status != PlayerState.Status.PAUSED
-        val title = track?.let { "${it.number}. ${it.title}" } ?: "音乐 CD"
-        val text = listOfNotNull(track?.performer ?: c?.album?.performer, c?.album?.title).distinct().joinToString(" · ").ifEmpty { "DiskAndroid" }
+        val md = c?.let { metadata.metadataFor(it.disc) }
+        val title = if (c != null && track != null) "${track.number}. ${TrackNames.title(c.disc, md, track.number)}" else "音乐 CD"
+        val text = if (c != null) {
+            listOfNotNull(track?.let { TrackNames.artist(c.disc, md, it.number) }, TrackNames.album(c.disc, md)).distinct().joinToString(" · ")
+        } else {
+            ""
+        }.ifEmpty { "DiskAndroid" }
+        val art = md?.coverUrl?.let { metadata.covers.value[it] }
         fun action(icon: Int, label: String, action: String) =
             Notification.Action.Builder(Icon.createWithResource(this, icon), label, serviceIntent(action)).build()
         return Notification.Builder(this, CHANNEL_ID)
@@ -185,6 +201,7 @@ class CdPlaybackService : Service() {
             .addAction(action(android.R.drawable.ic_media_next, "下一首", ACTION_NEXT))
             .addAction(action(android.R.drawable.ic_menu_close_clear_cancel, "停止", ACTION_STOP))
             .setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0, 1, 2))
+            .apply { if (art != null) setLargeIcon(art) }
             .build()
     }
 

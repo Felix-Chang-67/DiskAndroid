@@ -27,7 +27,7 @@ class MainActivitySmokeTest {
 
     @Test
     fun narrowLayoutShowsGuideCopiesDiagnosticsAndShowsLogs() {
-        compose.onNodeWithText("：音乐 CD 播放（CD-TEXT 日文曲名）", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("：在线识别曲名、封面与歌词", substring = true).assertIsDisplayed()
         // 小屏上后面的卡片在可视区外，LazyColumn 不会组合它们，先滚过去
         val deviceList = compose.onNode(hasScrollToKeyAction())
         deviceList.performScrollToKey("empty")
@@ -56,7 +56,7 @@ class MainActivityWideLayoutTest {
 
     @Test
     fun tabletLandscapeShowsDeviceAndLogPanesSideBySide() {
-        compose.onNodeWithText("：音乐 CD 播放（CD-TEXT 日文曲名）", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("：在线识别曲名、封面与歌词", substring = true).assertIsDisplayed()
         compose.onNodeWithText("自动滚动").assertIsDisplayed()
     }
 }

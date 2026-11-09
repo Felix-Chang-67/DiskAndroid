@@ -1,0 +1,62 @@
+{
+ "result": {
+  "albums": [
+   {
+    "name": "DEEPER",
+    "id": 3464017,
+    "size": 10,
+    "picUrl": "https://p2.music.126.net/IBXAEynR-2kCCz1or8xB-w==/109951169065028523.jpg",
+    "publishTime": 1456243200000,
+    "company": "索尼音乐",
+    "artist": {
+     "name": "ヒトリエ",
+     "id": 784134
+    },
+    "artists": [
+     {
+      "name": "ヒトリエ",
+      "id": 784134
+     }
+    ]
+   },
+   {
+    "name": "シャッタードール(完全生産限定盤)",
+    "id": 3420136,
+    "size": 3,
+    "picUrl": "https://p2.music.126.net/RhhQ-Pd1qSYl-LAURt3c1A==/3397490932848110.jpg",
+    "publishTime": 1446566400007,
+    "company": "SMAR",
+    "artist": {
+     "name": "ヒトリエ",
+     "id": 784134
+    },
+    "artists": [
+     {
+      "name": "ヒトリエ",
+      "id": 784134
+     }
+    ]
+   },
+   {
+    "name": "one-Me Tour “DEEP/SEEK” at STUDIO COAST",
+    "id": 90702554,
+    "size": 20,
+    "picUrl": "https://p2.music.126.net/u5gZD0sz53o4ikA2KzhyfA==/109951165054110575.jpg",
+    "publishTime": 1471363200000,
+    "company": "索尼音乐",
+    "artist": {
+     "name": "ヒトリエ",
+     "id": 784134
+    },
+    "artists": [
+     {
+      "name": "ヒトリエ",
+      "id": 784134
+     }
+    ]
+   }
+  ],
+  "albumCount": 3
+ },
+ "code": 200
+}

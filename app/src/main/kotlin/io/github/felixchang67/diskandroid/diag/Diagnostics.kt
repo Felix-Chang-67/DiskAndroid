@@ -37,7 +37,7 @@ object Diagnostics {
                 line("  ----- 光驱会话 -----")
                 line("  传输：${s.description}")
                 line("  会话状态：${s.state.value.label()}；盘片：${s.media.value.label()}")
-                line("  BOT 统计：${drive.bot.stats}")
+                line("  BOT 统计：${drive.bot.stats}；${drive.bot.ioStats()}")
                 s.info.value?.let { info ->
                     info.describeLines().forEach { line("  $it") }
                     line("  原始响应：")
@@ -62,6 +62,12 @@ object Diagnostics {
                     "缓冲 ${p.bufferedMs} ms；静音扇区 ${p.badSectors}；字节序 ${p.byteOrder}；去加重 ${if (p.deemphasis) "开" else "关"}",
             )
             p.message?.let { line("消息：$it") }
+            line()
+        }
+
+        container.metadata.describeLines().takeIf { it.isNotEmpty() }?.let { lines ->
+            line("===== 在线曲目信息 =====")
+            lines.forEach { line(it) }
             line()
         }
 

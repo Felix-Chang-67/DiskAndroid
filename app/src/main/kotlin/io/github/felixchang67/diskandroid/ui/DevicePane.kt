@@ -90,7 +90,7 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onEject = { vm.eject(d.deviceName) },
                 onRefresh = { vm.refreshDrive(d.deviceName) },
                 discExtras = { session, disc ->
-                    if (disc.hasAudio) CdPlayerSection(session, disc, vm.player) { track -> vm.playTrack(d.deviceName, track) }
+                    if (disc.hasAudio) CdPlayerSection(session, disc, vm.player, vm.metadata) { track -> vm.playTrack(d.deviceName, track) }
                 },
             )
         }
@@ -114,14 +114,14 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：音乐 CD 播放（CD-TEXT 日文曲名）", style = MaterialTheme.typography.titleMedium)
-            Text("1. 放入日本的音乐 CD（专辑、单曲都行；最好有一张带 CD-TEXT 的）。就绪后下方会出现“音乐 CD”卡片和曲目列表。")
-            Text("2. 看专辑名、艺人、曲名是否正确显示日文（没有 CD-TEXT 的盘显示 Track 1、Track 2…）。")
-            Text("3. 点曲目播放；试试 暂停 / 继续、上一首 / 下一首、拖动进度条；锁屏、息屏后是否继续播放；通知栏和锁屏上的控制按钮。")
-            Text("4. 播放时拔掉耳机应自动暂停；播放中按光驱弹出键或拔掉光驱，App 应立即停止且不卡死。有划痕的盘可以测读错时的静音处理。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：在线识别曲名、封面与歌词", style = MaterialTheme.typography.titleMedium)
+            Text("1. 放入没有 CD-TEXT 的日本 CD。就绪后几秒内，“音乐 CD”卡片会显示专辑名、日文曲名（下一行是网易云的中文译名）和封面。")
+            Text("2. 播放时，播放条下方显示同步歌词（日文 + 中文翻译），会跟着播放进度走。")
+            Text("3. 识别错了或没识别出来：点“结果不对？ / 手动识别”，从候选里选，或输入专辑名、艺人搜索。")
+            Text("4. 上一版播放时偶尔卡住 6 秒、静音一小段的问题已修，请连续播放一整张专辑看看还有没有。")
             Text("5. 测完点“导出日志（zip）”发给我。")
             Text(
-                "本版本只发送白名单里的只读命令（新增 READ CD 读音频、SET CD SPEED 播放时降速），不会写盘，也不会修改地区码。",
+                "发给光驱的仍只有白名单里的只读命令（本版新增读取盘上条码的 READ SUB-CHANNEL），不会写盘，也不会修改地区码。联网只发送光盘目录、条码和搜索词，可在播放设置里关闭。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

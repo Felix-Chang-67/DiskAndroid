@@ -5,6 +5,9 @@
         android:name="android.hardware.usb.host"
         android:required="true" />
 
+    <!-- 在线识别曲名 / 封面 / 歌词（MusicBrainz、网易云音乐、LRCLIB），可在播放设置里关闭 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- 音乐 CD 播放：前台服务（息屏后继续播放、通知栏 / 锁屏控制）、播放期间保持 CPU 运行 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />

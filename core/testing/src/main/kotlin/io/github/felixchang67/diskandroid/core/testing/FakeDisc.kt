@@ -26,6 +26,8 @@ class FakeDisc(
     val cdTextPacks: ByteArray? = null,
     /** READ CD 读到这些 LBA 时返回介质错误（3/11/05）。 */
     val badSectors: Set<Long> = emptySet(),
+    /** 子通道里的 MCN（JAN 条码），null 表示盘上没有。 */
+    val mcn: String? = null,
 ) {
     val sessions: List<Int> get() = tracks.map { it.session }.distinct().sorted()
 
@@ -37,13 +39,14 @@ class FakeDisc(
             cdText: ByteArray? = null,
             badSectors: Set<Long> = emptySet(),
             preEmphasisTracks: Set<Int> = emptySet(),
+            mcn: String? = null,
         ): FakeDisc {
             val tracks = (1..trackCount).map { n ->
                 FakeTrack(n, 1, (n - 1) * secondsPerTrack * 75L, secondsPerTrack * 75L, audio = true, preEmphasis = n in preEmphasisTracks)
             }
             return FakeDisc(
                 0x0008, tracks, trackCount * secondsPerTrack * 75L, blockLength = 2352, readSpeedKBps = 4234,
-                cdTextPacks = cdText, badSectors = badSectors,
+                cdTextPacks = cdText, badSectors = badSectors, mcn = mcn,
             )
         }
 
@@ -74,4 +77,14 @@ class FakeDisc(
             return FakeDisc(profile, base.tracks, base.leadOutLba, base.blockLength, dvdProtection = base.dvdProtection, dvdRegionMask = base.dvdRegionMask, readSpeedKBps = base.readSpeedKBps)
         }
     }
+}
+
+/** 按真实曲目时长（毫秒）造一张音乐 CD：第 1 轨从 LBA 0 开始，轨间没有空隙。 */
+fun FakeDisc.Companion.audioCdWithDurations(durationsMs: List<Long>, mcn: String? = null): FakeDisc {
+    var lba = 0L
+    val tracks = durationsMs.mapIndexed { i, ms ->
+        val sectors = ms * 75 / 1000
+        FakeTrack(i + 1, 1, lba, sectors, audio = true).also { lba += sectors }
+    }
+    return FakeDisc(0x0008, tracks, lba, blockLength = 2352, mcn = mcn)
 }

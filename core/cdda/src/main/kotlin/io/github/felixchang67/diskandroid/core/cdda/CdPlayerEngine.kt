@@ -92,8 +92,8 @@ class CdPlayerEngine(
     class Options(
         /** 每条 READ CD 读多少扇区：24 × 2352 = 56448 字节，0.32 秒音频。 */
         val chunkSectors: Int = 24,
-        /** 通道里最多缓存几块（12 块约 3.8 秒），再加上输出缓冲。 */
-        val bufferChunks: Int = 12,
+        /** 通道里最多缓存几块（32 块约 10 秒，够撑过一次 BOT 复位的 6 秒等待），再加上输出缓冲。 */
+        val bufferChunks: Int = 32,
         val byteOrder: ByteOrderMode = ByteOrderMode.AUTO,
         val deemphasis: Boolean = true,
         /** 播放时的读取速度（kB/s），null 表示不调整。 */

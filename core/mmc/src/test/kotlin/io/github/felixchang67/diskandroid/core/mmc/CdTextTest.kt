@@ -155,4 +155,18 @@ class CdTextTest {
         assertEquals("43020500000000000400", Hex.compact(MmcCommands.readCdText(4).cdb))
         assertEquals("BB0002C2FFFF000000000000", Hex.compact(MmcCommands.setCdSpeed(706).cdb))
     }
+
+    @Test
+    fun mcnCommandAndParserFollowLinuxAndLibcdio() {
+        assertEquals("42004002000000001800", Hex.compact(MmcCommands.readMcn().cdb))
+        val resp = ByteArray(24)
+        resp[1] = 0x15
+        resp[3] = 20
+        resp[4] = 0x02
+        resp[8] = 0x80.toByte()
+        "4547403043075".toByteArray().copyInto(resp, 9)
+        assertEquals("4547403043075", SubChannel.parseMcn(resp))
+        resp[8] = 0 // MCVAL = 0：没有 MCN
+        assertNull(SubChannel.parseMcn(resp))
+    }
 }

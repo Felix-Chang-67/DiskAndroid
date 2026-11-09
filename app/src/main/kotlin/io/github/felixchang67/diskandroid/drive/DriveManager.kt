@@ -131,6 +131,7 @@ class DriveManager(
                     opened.io, lun = 0, log = log,
                     description = "BOT over USB ${report.vidPid}（LUN 0，${report.effectiveSpeed.label}）",
                 )
+                log.i(TAG, "批量传输方式：${opened.io.method}")
                 val transport = GuardedScsiTransport(LoggingScsiTransport(bot, log), ReadOnlyPolicy, log)
                 val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "drive-${report.vidPid}").apply { isDaemon = true } }
                 val dispatcher = executor.asCoroutineDispatcher()
@@ -186,7 +187,7 @@ class DriveManager(
         val drive = _drives.value[deviceName] ?: return
         _drives.update { it - deviceName }
         val summary = mutableListOf("会话结束 ${LogFormat.isoTime(System.currentTimeMillis())}（$reason）：${drive.displayName} ${drive.vidPid}")
-        summary += "  BOT 统计：${drive.bot.stats}"
+        summary += "  BOT 统计：${drive.bot.stats}；${drive.bot.ioStats()}"
         drive.session.events.value.takeLast(15).forEach { summary += "  $it" }
         _history.update { (it + listOf(summary)).takeLast(MAX_HISTORY) }
         drive.shutdown(disconnected)

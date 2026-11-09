@@ -502,3 +502,19 @@ class ReadPerformance(val write: Boolean, val except: Boolean, val descriptors: 
         }
     }
 }
+
+/** READ SUB-CHANNEL 的解析。 */
+object SubChannel {
+    /**
+     * 格式 02h 的响应：字节 4 = 格式码 02h，字节 8 bit7 = MCVAL（有效），字节 9–21 = 13 位数字（libcdio 同样检查 MCVAL 后取 buf[9]）。
+     * 无效、全 0 或不是数字时返回 null。
+     */
+    fun parseMcn(data: ByteArray): String? {
+        if (data.size < 22) return null
+        if ((data[4].toInt() and 0xFF) != 0x02) return null
+        if ((data[8].toInt() and 0x80) == 0) return null
+        val mcn = String(data, 9, 13, Charsets.US_ASCII)
+        if (!mcn.all { it in '0'..'9' } || mcn.all { it == '0' }) return null
+        return mcn
+    }
+}

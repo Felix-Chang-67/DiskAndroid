@@ -2,8 +2,8 @@ package io.github.felixchang67.diskandroid.core.usb
 
 /**
  * 极小的 usbfs ioctl 封装（native/diskcore/src/usbfs_jni.c），只做 Android 公开 API 做不到的事：
- * 查询链路速度、usbfs 能力、内核驱动绑定情况，以及 BOT 错误恢复要用的 CLEAR_HALT / RESET。
- * 数据收发仍然走 Kotlin 的 UsbDeviceConnection.bulkTransfer。
+ * 查询链路速度、usbfs 能力、内核驱动绑定情况，BOT 错误恢复要用的 CLEAR_HALT / RESET，
+ * 以及能返回 errno 的批量传输（USBDEVFS_BULK；原生库不可用时退回 UsbDeviceConnection.bulkTransfer）。
  *
  * 所有返回 Int 的函数：>= 0 表示成功，< 0 表示 -errno。
  */
@@ -25,6 +25,12 @@ object UsbfsNative {
     @JvmStatic external fun nativeClearHalt(fd: Int, endpoint: Int): Int
     @JvmStatic external fun nativeResetDevice(fd: Int): Int
     @JvmStatic external fun nativeStrerror(errno: Int): String
+    @JvmStatic external fun nativeBulk(fd: Int, endpoint: Int, buffer: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int
+
+    /** 原生库里有没有 nativeBulk（旧版本的 .so 没有）。 */
+    val hasBulk: Boolean by lazy {
+        isAvailable && runCatching { nativeVersion() }.getOrDefault("").substringAfter('/').toIntOrNull()?.let { it >= 2 } == true
+    }
 
     /** -errno → 可读文本。 */
     fun errorText(result: Int): String {

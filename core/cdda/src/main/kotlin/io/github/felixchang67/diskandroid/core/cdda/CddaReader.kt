@@ -45,6 +45,9 @@ class CddaReader(
     private sealed interface Attempt {
         data object Ok : Attempt
         class Failed(val detail: String) : Attempt
+
+        /** 传输层错误（STALL / I/O 错误 / 超时，BOT 层已做过恢复），不是盘面问题。 */
+        class Transport(val detail: String) : Attempt
         class Stop(val reason: StopReason, val detail: String) : Attempt
     }
 
@@ -56,15 +59,32 @@ class CddaReader(
     /** 从 [lba] 起读 [count] 个扇区到 [buffer]（从下标 0 开始，需要 count × 2352 字节）。 */
     suspend fun read(lba: Long, count: Int, buffer: ByteArray): Result {
         require(buffer.size >= count * SECTOR_BYTES)
-        val deadline = clock() + budgetMs
+        var deadline = clock() + budgetMs
         var lastError = ""
-        for (round in 0 until 2) {
+        var transportRetries = 0
+        var round = 0
+        while (round < 2) {
             when (val a = attempt(lba, count, buffer, 0)) {
                 Attempt.Ok -> return Result.Ok
                 is Attempt.Stop -> return Result.Stop(a.reason, a.detail)
-                is Attempt.Failed -> lastError = a.detail
+                is Attempt.Transport -> {
+                    // 传输层出错（已经复位恢复）：数据本身没问题，整块重读；复位耗的时间不算进坏扇区的时间预算
+                    lastError = a.detail
+                    if (transportRetries < MAX_TRANSPORT_RETRIES) {
+                        transportRetries++
+                        retries++
+                        log.w(TAG, "传输出错后重读这一块（第 $transportRetries 次）", "起点" to "$lba（${Msf.format(lba)}）", "错误" to a.detail)
+                        deadline = clock() + budgetMs
+                        continue
+                    }
+                    round++
+                }
+                is Attempt.Failed -> {
+                    lastError = a.detail
+                    round++
+                }
             }
-            if (round == 0) retries++
+            if (round == 1) retries++
             if (clock() > deadline) break
         }
         log.w(TAG, "整块读取失败，改为逐扇区读取", "起点" to "$lba（${Msf.format(lba)}）", "扇区数" to count, "错误" to lastError)
@@ -77,6 +97,15 @@ class CddaReader(
                 when (val a = attempt(lba + i, 1, buffer, i * SECTOR_BYTES)) {
                     Attempt.Ok -> ok = true
                     is Attempt.Stop -> return Result.Stop(a.reason, a.detail)
+                    is Attempt.Transport -> {
+                        lastError = a.detail
+                        tries++
+                        retries++
+                        if (transportRetries < MAX_TRANSPORT_RETRIES) {
+                            transportRetries++
+                            deadline = clock() + budgetMs
+                        }
+                    }
                     is Attempt.Failed -> {
                         lastError = a.detail
                         tries++
@@ -140,7 +169,7 @@ class CddaReader(
                         else -> return Attempt.Failed(s.describe())
                     }
                 }
-                is ScsiResult.TransportError -> return Attempt.Failed(r.toString())
+                is ScsiResult.TransportError -> return Attempt.Transport(r.toString())
                 is ScsiResult.Refused -> return Attempt.Stop(StopReason.REFUSED, r.reason)
             }
         }
@@ -149,6 +178,9 @@ class CddaReader(
     companion object {
         const val TAG = "CDDA"
         const val SECTOR_TRIES = 3
+
+        /** 每块最多因传输错误重读几次（每次之前 BOT 层可能已经复位并等了 6 秒）。 */
+        const val MAX_TRANSPORT_RETRIES = 2
 
         fun ranges(lbas: List<Long>): String {
             if (lbas.isEmpty()) return ""

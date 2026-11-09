@@ -8,7 +8,7 @@ import io.github.felixchang67.diskandroid.core.log.LogLevel
  * USB 层的批量传输接口。Android 实现包装 UsbDeviceConnection；测试里用模拟设备。
  *
  * 失败时返回负数。Android 的 bulkTransfer 只返回 -1（拿不到 errno），所以调用方要结合
- * [isAttached] 和耗时来判断是断开、超时还是 STALL；能拿到 errno 的实现（JNI）返回 -errno。
+ * [isAttached] 和耗时来判断是断开、超时还是 STALL；能拿到 errno 的实现（JNI）返回 -errno（见 [UsbErrno]）。
  */
 interface BulkIo {
     val inEndpoint: Int
@@ -30,6 +30,12 @@ interface BulkIo {
 
     /** 单调时钟（毫秒），测试里可替换。 */
     fun nowMs(): Long = System.nanoTime() / 1_000_000
+
+    /** 最近一次失败的 bulkIn 在出错前已经收到的字节数（分块传输时才可能非 0）。 */
+    val lastPartial: Int get() = 0
+
+    /** 传输层的附加统计（例如 ENOMEM 重试次数），写进诊断信息。 */
+    fun extraStats(): String = ""
 }
 
 /** BOT 层的统计（写进诊断信息）。 */
@@ -41,10 +47,11 @@ class BotStats {
     @Volatile var resets = 0L
     @Volatile var skippedDataPhase = 0L
     @Volatile var zeroLengthCsw = 0L
+    @Volatile var ioErrors = 0L
     @Volatile var lastResetAtMs = -1L
 
     override fun toString() =
-        "命令 $commands，CHECK CONDITION $checkConditions，STALL $stalls，超时 $timeouts，" +
+        "命令 $commands，CHECK CONDITION $checkConditions，STALL $stalls，超时 $timeouts，I/O 错误 $ioErrors，" +
             "复位恢复 $resets，跳过数据阶段 $skippedDataPhase，0 长度 CSW $zeroLengthCsw"
 }
 
@@ -107,6 +114,9 @@ class BotTransport(
     }
 
     val stats = BotStats()
+
+    /** USB 层的附加统计（传输方式、ENOMEM 重试次数……）。 */
+    fun ioStats(): String = io.extraStats()
 
     override val resetCount: Long get() = stats.resets
 
@@ -201,17 +211,27 @@ class BotTransport(
                 }
             } else {
                 when (val kind = classify(n, t0, cmd.timeoutMs)) {
-                    TransportErrorKind.DEVICE_GONE -> return Transaction.Failed(kind, "数据阶段设备断开", 0)
+                    TransportErrorKind.DEVICE_GONE -> return Transaction.Failed(kind, "数据阶段设备断开（${UsbErrno.describe(n)}）", 0)
                     TransportErrorKind.TIMEOUT -> {
                         stats.timeouts++
                         resetRecovery("数据阶段超时（${cmd.timeoutMs} ms）")
                         return Transaction.Failed(kind, "数据阶段超时（${cmd.timeoutMs} ms）", 0)
                     }
+                    TransportErrorKind.IO_ERROR -> {
+                        // 不是 STALL：设备可能还停在数据阶段，这时去读 CSW 只会读到数据包（babble），直接复位恢复
+                        stats.ioErrors++
+                        resetRecovery("数据阶段 I/O 错误：${UsbErrno.describe(n)}")
+                        return Transaction.Failed(kind, "数据阶段 I/O 错误：${UsbErrno.describe(n)}", io.lastPartial)
+                    }
                     else -> {
                         stats.stalls++
+                        transferred = io.lastPartial
                         val r = io.clearHalt(endpoint)
                         if (r == -ENODEV) return Transaction.Failed(TransportErrorKind.DEVICE_GONE, "清除 HALT 时设备已断开", 0)
-                        log.w(TAG, "数据阶段 STALL，已清除端点 HALT", "端点" to "0x${Hex.byte(endpoint)}", "结果" to r)
+                        log.w(
+                            TAG, "数据阶段 STALL，已清除端点 HALT",
+                            "端点" to "0x${Hex.byte(endpoint)}", "结果" to r, "原因" to UsbErrno.describe(n), "已收到字节" to transferred,
+                        )
                     }
                 }
             }
@@ -272,17 +292,23 @@ class BotTransport(
                     resetRecovery("读取 CSW 超时（$timeoutMs ms）")
                     return CswRead.Error(kind, "读取 CSW 超时（$timeoutMs ms）")
                 }
+                TransportErrorKind.IO_ERROR -> {
+                    stats.ioErrors++
+                    resetRecovery("读取 CSW 时 I/O 错误：${UsbErrno.describe(n)}")
+                    return CswRead.Error(kind, "读取 CSW 时 I/O 错误：${UsbErrno.describe(n)}")
+                }
                 else -> {
                     stats.stalls++
                     val r = io.clearHalt(io.inEndpoint)
                     if (r == -ENODEV) return CswRead.Error(TransportErrorKind.DEVICE_GONE, "清除 HALT 时设备已断开")
-                    log.w(TAG, "读取 CSW 时 STALL，已清除 bulk-in HALT，重读一次", "结果" to r)
+                    log.w(TAG, "读取 CSW 时 STALL，已清除 bulk-in HALT，重读一次", "结果" to r, "原因" to UsbErrno.describe(n))
                     t0 = io.nowMs()
                     n = io.bulkIn(buf, 0, CSW_LENGTH, timeoutMs)
                     if (n < 0) {
                         val kind2 = classify(n, t0, timeoutMs)
                         if (kind2 == TransportErrorKind.DEVICE_GONE) return CswRead.Error(kind2, "读取 CSW 时设备断开")
-                        resetRecovery("第二次读取 CSW 仍然失败（${kind2.label}）")
+                        if (kind2 == TransportErrorKind.IO_ERROR) stats.ioErrors++
+                        resetRecovery("第二次读取 CSW 仍然失败（${kind2.label}，${UsbErrno.describe(n)}）")
                         return CswRead.Error(kind2, "第二次读取 CSW 失败")
                     }
                 }
@@ -302,13 +328,21 @@ class BotTransport(
     }
 
     /**
-     * 判断失败原因。Android 的 bulkTransfer 失败只返回 -1：
-     * 设备不在了 → 断开；耗时接近超时 → 超时；否则按 STALL 处理（后续清 HALT 时若返回 ENODEV 再改判为断开）。
+     * 判断失败原因。有 errno（JNI 传输）时按 errno：EPIPE = STALL，ETIMEDOUT = 超时，ENODEV / ESHUTDOWN = 断开，
+     * 其余（EPROTO、EOVERFLOW、ENOMEM……）= I/O 错误。
+     * 只有 -1（Android 公开 API）时只能猜：设备不在了 → 断开；耗时接近超时 → 超时；否则按 STALL 处理。
      */
     private fun classify(result: Int, startedAt: Long, timeoutMs: Int): TransportErrorKind {
-        if (result == -ENODEV || !io.isAttached()) return TransportErrorKind.DEVICE_GONE
-        val elapsed = io.nowMs() - startedAt
-        return if (elapsed >= timeoutMs - 50) TransportErrorKind.TIMEOUT else TransportErrorKind.STALL
+        if (result == -ENODEV || result == -UsbErrno.ESHUTDOWN || !io.isAttached()) return TransportErrorKind.DEVICE_GONE
+        return when (result) {
+            -UsbErrno.UNKNOWN -> {
+                val elapsed = io.nowMs() - startedAt
+                if (elapsed >= timeoutMs - 50) TransportErrorKind.TIMEOUT else TransportErrorKind.STALL
+            }
+            -UsbErrno.EPIPE -> TransportErrorKind.STALL
+            -UsbErrno.ETIMEDOUT, -UsbErrno.ETIME -> TransportErrorKind.TIMEOUT
+            else -> TransportErrorKind.IO_ERROR
+        }
     }
 
     /** BOT 5.3.4 复位恢复：Bulk-Only Mass Storage Reset → 等待 → 清 bulk-in HALT → 清 bulk-out HALT。 */

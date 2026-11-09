@@ -30,6 +30,8 @@ class FakeBotDevice(val mmc: FakeMmc = FakeMmc()) : BulkIo {
         TIMEOUT_DATA_IN,
         /** 发送 CBW 后设备被拔出。 */
         DISCONNECT_AFTER_CBW,
+        /** 数据阶段返回 -EPROTO（I/O 错误，设备仍停在数据阶段；不复位就会一直错位）。 */
+        IO_ERROR_DATA_IN,
     }
 
     override val inEndpoint = 0x81
@@ -124,6 +126,7 @@ class FakeBotDevice(val mmc: FakeMmc = FakeMmc()) : BulkIo {
                     clock += timeoutMs
                     return -1
                 }
+                Fault.IO_ERROR_DATA_IN -> return -71
                 Fault.SKIP_DATA_PHASE -> {
                     phase = Phase.CBW
                     return csw(expected).copyInto(buffer, offset).let { BotTransport.CSW_LENGTH }

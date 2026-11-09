@@ -106,6 +106,7 @@ class FakeMmc {
             0xBD -> good(mechanismStatus(), allocation12(cdb))
             0x25, 0x51, 0x52, 0x43, 0xAD, 0xAC -> notReady() ?: mediaCommand(op, cdb)
             0xBE -> notReady() ?: readCd(cdb)
+            0x42 -> notReady() ?: subChannel(cdb)
             0xBB -> {
                 speedRequests += ((cdb[2].toInt() and 0xFF) shl 8) or (cdb[3].toInt() and 0xFF)
                 Reply(Reply.GOOD)
@@ -211,6 +212,20 @@ class FakeMmc {
         }
         val len = body.size
         return good(byteArrayOf((len shr 8).toByte(), len.toByte()) + body, allocation10(cdb))
+    }
+
+    /** READ SUB-CHANNEL：只支持格式 02h（MCN）。 */
+    private fun subChannel(cdb: ByteArray): Reply {
+        if ((cdb[3].toInt() and 0xFF) != 0x02) return check(0x5, 0x24, 0x00)
+        val b = ByteArray(24)
+        b[1] = 0x15 // 音频状态：无
+        b[3] = 20
+        b[4] = 0x02
+        disc?.mcn?.let { mcn ->
+            b[8] = 0x80.toByte()
+            mcn.toByteArray(Charsets.US_ASCII).copyInto(b, 9, 0, 13)
+        }
+        return good(b, allocation10(cdb))
     }
 
     /** ADR 1 + 控制位：音频 0h（预加重 1h），数据 4h。 */

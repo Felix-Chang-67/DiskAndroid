@@ -7,11 +7,14 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.SystemClock
 import io.github.felixchang67.diskandroid.core.scsi.BulkIo
+import io.github.felixchang67.diskandroid.core.scsi.ChunkedTransfer
 import java.io.Closeable
 
 /**
- * 用 Android 公开 API 实现的批量传输（纯 Kotlin 路径）：数据收发走 UsbDeviceConnection.bulkTransfer。
- * 清 HALT 走 JNI 的 USBDEVFS_CLEAR_HALT（内核会同时复位主机侧 data toggle），原生库不可用时退回控制传输。
+ * Android 上的批量传输：
+ * - 数据收发优先走 JNI 的 USBDEVFS_BULK（能拿到 errno），原生库不可用时退回 UsbDeviceConnection.bulkTransfer；
+ * - 每次最多 16 KB，大块数据拆成多次传输（见 [ChunkedTransfer]：N1.5 真机上 56 KB 一次的传输偶发内核分配失败）；
+ * - 清 HALT 走 JNI 的 USBDEVFS_CLEAR_HALT（内核会同时复位主机侧 data toggle），原生库不可用时退回控制传输。
  */
 class AndroidUsbBulkIo(
     private val usbManager: UsbManager,
@@ -26,12 +29,35 @@ class AndroidUsbBulkIo(
     override val interfaceNumber: Int = intf.id
 
     private val fd = connection.fileDescriptor
+    private val native = UsbfsNative.hasBulk
+    private val chunkIn = ChunkedTransfer(chunkSize(epIn))
+    private val chunkOut = ChunkedTransfer(chunkSize(epOut))
+
+    /** 传输方式（写进连接报告）。 */
+    val method: String = if (native) "usbfs ioctl（返回 errno），每次 ≤ ${chunkSize(epIn) / 1024} KB" else "bulkTransfer（公开 API），每次 ≤ ${chunkSize(epIn) / 1024} KB"
+
+    override val lastPartial: Int get() = chunkIn.lastPartial
 
     override fun bulkIn(buffer: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int =
-        connection.bulkTransfer(epIn, buffer, offset, length, timeoutMs)
+        chunkIn.run(length) { off, len -> transfer(epIn, buffer, offset + off, len, timeoutMs) }
 
     override fun bulkOut(buffer: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int =
-        connection.bulkTransfer(epOut, buffer, offset, length, timeoutMs)
+        chunkOut.run(length) { off, len -> transfer(epOut, buffer, offset + off, len, timeoutMs) }
+
+    private fun transfer(ep: UsbEndpoint, buffer: ByteArray, offset: Int, length: Int, timeoutMs: Int): Int =
+        if (native) {
+            UsbfsNative.nativeBulk(fd, ep.address, buffer, offset, length, timeoutMs)
+        } else {
+            connection.bulkTransfer(ep, buffer, offset, length, timeoutMs)
+        }
+
+    override fun extraStats(): String = "传输方式：$method；ENOMEM 重试 ${chunkIn.enomemRetries + chunkOut.enomemRetries} 次"
+
+    /** 16 KB，并保证是端点最大包长的整数倍（拆开的每一块都必须以整包结束）。 */
+    private fun chunkSize(ep: UsbEndpoint): Int {
+        val packet = ep.maxPacketSize.coerceAtLeast(64)
+        return maxOf(packet, ChunkedTransfer.DEFAULT_MAX_CHUNK / packet * packet)
+    }
 
     override fun clearHalt(endpoint: Int): Int {
         if (UsbfsNative.isAvailable) return UsbfsNative.nativeClearHalt(fd, endpoint)

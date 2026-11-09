@@ -34,6 +34,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val drives: StateFlow<Map<String, ActiveDrive>> = c.driveManager.drives
     val connecting: StateFlow<Set<String>> = c.driveManager.connecting
     val player = c.player
+    val metadata = c.metadata
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
