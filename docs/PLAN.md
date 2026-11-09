@@ -1,14 +1,16 @@
-# DiskAndroid 开发计划（v1，待确认）
+# DiskAndroid 开发计划（v2）
 
 > 平板：Xiaomi Pad 7S Pro（Android 15 / HyperOS 2）｜光驱：BUFFALO BRXL-PTV6U3-SVB（USB 3.x BOT / MMC）
 > 技术栈：Kotlin + Jetpack Compose，minSdk 29，targetSdk 35，NDK
-> 本文档是计划，不含代码。你确认（或修改）后，我从 P0 开始，每个可测节点停下来给你安装/测试/日志说明。
+> 开发全部在云端容器里完成（你暂时没有电脑可用）；每个可测节点我把 APK 直接发到对话里，你在平板上安装测试、把诊断信息贴回来。
+>
+> 进度：P0 + N1.1 已完成（见第 7 节"决策与进度记录"和 `docs/testing/N1.1.md`）。
 
 ---
 
 ## 0. 结论速览
 
-- **云端容器能编译，但连不到你的平板。** JDK 21 已有；Android SDK / NDK / adb / meson 都缺，但都能从官方源下载安装。安装 APK、抓日志要在你那边完成（无线调试 adb，或 CI 产出的 APK + App 内日志导出）。
+- **云端容器负责全部编译和自动化测试，但连不到你的平板。** 工具链已装好（见 1.1）。安装 APK、真机测试在你那边完成：APK 通过对话发给你，日志通过 App 的"复制诊断信息"贴回来。
 - **我已下载并核对了所有第三方库的源码接口：**
   - libdvdread / libdvdnav / libbluray / libudfread 都有"回调式读块"接口，可以直接接到我们的 ScsiTransport，不用改源码。
   - **libdvdcss 和 libaacs 在回调模式下不会对光驱做认证**（libdvdcss 的 `dvdcss_use_ioctls()` 在 stream 模式下直接返回 0；libaacs 的 MMC 层只有 linux/darwin/win32 三种设备实现，没有设备路径时 `mmc_open(NULL)` 直接返回空）。两者都要各打一个"SCSI 回调后端"补丁，这是阶段 3 的核心工作量。
@@ -37,18 +39,20 @@
 
 **当前最新稳定版本（2026-11-09 查得，动手时锁定）：** AGP 9.5.1、Gradle 9.9.0、Kotlin 2.4.21、Compose BOM 2026.09.00、Media3 1.11.1、NDK r30、libusb 1.0.30、libudfread 1.2.0、libdvdread 7.1.1、libdvdnav 7.0.0、libdvdcss 1.6.0、libbluray 1.5.0、libaacs 0.12.0、libbdplus 0.2.0、libgcrypt 1.12.4、libgpg-error 1.61、FFmpeg 9.0.2、libburn 1.5.8、libisofs / libisoburn 1.5.8.pl02。
 
-SDK 级别：compileSdk 36（新版 AndroidX 通常要求较高的 compileSdk），targetSdk 35，minSdk 29（按你的要求）。只打 arm64-v8a。
+SDK 级别：compileSdk 37（Compose BOM 2026.09.00 的库要求 ≥ 37），targetSdk 35，minSdk 29（按你的要求）。只打 arm64-v8a。
 
-**你确认后我在容器里要做的：** 装 cmdline-tools、platform-tools、platform 36、build-tools、NDK r30、CMake，以及 `pip install meson`。总计约 3–4 GB。
+**已在容器里安装（2026-11-09）：** cmdline-tools、platform-tools、platforms android-36 / android-37.0、build-tools 36.1.0、NDK r30（30.0.16248370）、CMake 4.1.2；Gradle wrapper 9.9.0。meson 到 P2 引入第三方库时再装。
+
+**网络注意：** 官方 Maven Central（repo.maven.apache.org）对容器的出口 IP 返回 429 限流，所以 Gradle 和 Robolectric 都先走 Google 托管的 Maven Central 镜像（`maven-central.storage-download.googleapis.com`），官方 Central 作为后备。
+
+**容器里没有 KVM，跑不了模拟器。** 发 APK 前的检查是：JVM 单元测试 + Robolectric 冒烟测试（真正启动 Application 和 Activity、渲染 Compose 界面、点主要按钮）+ Lint + 检查 APK（签名、JNI 符号、16 KB 对齐）。USB 相关的行为只能在你的真机上验证。
 
 ### 1.2 你那边需要准备的
 
-1. **电脑：** Android Studio（最新稳定版，自带 adb）。强烈推荐，用来看 logcat、快速装包。
+1. **不需要电脑。** APK 直接发在对话里。
 2. **平板设置：**
-   - 开发者选项里打开"USB 调试"和"无线调试"。光驱占用唯一的 USB-C 口，所以 adb 只能走 Wi-Fi（Android 11+ 用 `adb pair` 配对，再 `adb connect`）。
-   - HyperOS 的"USB 安装"开关可能要求登录小米账号。
+   - 允许"安装未知应用"：给你用来打开 APK 的应用（Claude App / 浏览器 / 文件管理器）开这个权限。
    - 如果开着"纯净模式"，会拦截不是从应用商店来的 APK，需要关闭或者单次允许。
-   - 建议无线调试用 5 GHz Wi-Fi：USB 3.x 设备会干扰 2.4 GHz。
    - 省电策略：本 App 设为"无限制"，避免长时间读盘或刻录时被后台限制。
 3. **硬件：** 带 PD 供电的 USB 3.x 扩展坞，光驱的两个 USB 头都插上。
 4. **测试盘（按阶段逐步准备）：**
@@ -59,17 +63,17 @@ SDK 级别：compileSdk 36（新版 AndroidX 通常要求较高的 compileSdk）
 
 ### 1.3 每个节点的通用流程：怎么装、怎么测、日志在哪
 
-1. **构建：** 我在容器里编译，跑单元测试（用镜像文件模拟的 FakeDrive），然后 push 到 `claude/jolly-tesla-c2qlm6`。
-2. **拿 APK（两种方式，需要你选）：**
-   - **A（CI）：** GitHub Actions 每次 push 自动编 debug APK，你在平板浏览器里下载 artifact 安装。
-   - **B（本地）：** 你 `git pull` 后，在 Android Studio 里通过无线调试直接 Run。
-   - 为了两种方式装的包能互相覆盖安装，仓库里放一个**仅用于测试的 debug keystore**。否则签名不同就得先卸载，已导入的组件和设置会丢。
-3. **日志：**
-   - **App 内日志面板：** 实时显示，可按级别和模块过滤。
-   - **"导出日志"按钮：** 用 SAF 选位置，保存两个文件：`.log`（人类可读）和 `.jsonl`（机器可读，可以直接转成我这边的回放测试用例）。"分享"按钮走系统分享。
-   - **无线 adb 时：** `adb logcat -s DiskAndroid:V DiskAndroid.SCSI:V DiskAndroid.USB:V`
-   - App 也会在 `Android/data/<包名>/files/logs/` 存一份滚动日志（上限 N MB）。注意 Android 11+ 的文件管理器看不到这个目录，所以以"导出"为主。
-4. **每个节点我给你：** 安装方式、测试步骤、预期结果、要贴回的内容（日志/截图/听感描述）。
+1. **构建：** 我在容器里编译，跑单元测试（后续阶段用镜像文件模拟的 FakeDrive）和冒烟测试，提交并 push 到 `claude/jolly-tesla-c2qlm6`。
+2. **拿 APK：** 我把 release 构建的 APK（R8 裁剪、不混淆，体积小、运行快）直接作为附件发到对话里，你在平板上下载安装。
+   - 仓库里放了一个**仅用于测试的固定签名**（`keystore/`），每次构建出来的 APK 都能直接覆盖安装，不用卸载，已导入的组件和设置也不会丢。
+3. **日志（没有电脑，所以不依赖 adb）：**
+   - **"复制诊断信息"按钮（主要方式）：** 系统信息 + USB 设备 + 测试结果 + 最近 300 条日志，粘贴到对话里发给我。
+   - **"导出日志（zip）"按钮：** 用 SAF 选位置，zip 里有 `diagnostics.txt`、`.log`（人类可读）和 `.jsonl`（机器可读，可以转成我这边的回放测试用例）。
+   - **"分享日志"按钮：** 诊断信息 + 完整会话日志合成一个 txt，走系统分享。
+   - **App 内日志面板：** 实时显示，可按级别过滤。
+   - **闪退时：** 崩溃堆栈会同步写进日志文件；下次打开 App 时，系统记录的"上次退出原因"（崩溃 / ANR / 被系统杀掉）也会写进日志。重新打开 App 后点"复制诊断信息"即可。
+   - App 在 `Android/data/<包名>/files/logs/` 保留最近 20 个会话的日志。
+4. **每个节点我给你：** 安装方式、测试步骤、预期结果、要贴回的内容（诊断信息/截图/听感描述）。
 
 ---
 
@@ -536,3 +540,25 @@ N4.x + N1.5 → N5.1 / N5.2
 | 05/30/02 | 无法读取：格式不兼容 | 提示盘片 / 光驱不兼容 |
 | 05/64/00 | 该轨道模式下非法（如对音轨发 READ(10)） | 改用 READ CD |
 | 05/6F/00–05 | 版权保护：认证失败 / 密钥不存在 / 未建立 / 未认证读加密扇区 / 地区不符 / 地区设置次数 | P3 对应中文提示 |
+
+---
+
+## 7. 决策与进度记录
+
+### 7.1 决策（你说"在云端自行开发"之后，按第 6 节的默认项执行；有异议随时可改）
+
+| # | 事项 | 当前做法 |
+|---|---|---|
+| 1 | 构建与安装 | 你暂时没有电脑 → 全部在云端构建；APK 通过对话发送；测试签名放在仓库里，可直接覆盖安装 |
+| 2 | 许可证 | 推迟到 P2 第一次链接 GPL 库（libdvdread）时再加 LICENSE，届时再跟你确认（默认 GPL-3.0-or-later） |
+| 3 | P2 解析方式 | 用 libudfread / libdvdread / libbluray（到 P2 时生效） |
+| 4 | 阶段顺序 | P3（加密盘）在 P4（刻录）之前，按你原定顺序 |
+| 5 | 解密组件产出 | 你没有电脑编译 → 由我在容器里**单独**编译成独立 .so 文件，**不进 APK**，在对话里单独发给你，你在 App 里用"导入组件"导入 |
+| 6 | 默认分支 | 仓库原本为空，`claude/jolly-tesla-c2qlm6` 已成为默认分支；以后想改成 `main` 告诉我 |
+| 7 | 包名 | `io.github.felixchang67.diskandroid` |
+
+### 7.2 进度
+
+| 日期 | 节点 | 版本 | 内容 | 状态 |
+|---|---|---|---|---|
+| 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | 等待真机测试 |

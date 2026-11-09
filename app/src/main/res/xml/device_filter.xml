@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  插入匹配的 USB 设备时拉起本 App。
+  N1.1 阶段按"大容量存储 + Bulk-Only"匹配，所以插 U 盘也会弹出；
+  拿到光驱的 VID/PID 之后会收窄到光驱本身。
+-->
+<resources>
+    <!-- 08h 大容量存储 / 06h SCSI 透明命令集 / 50h Bulk-Only -->
+    <usb-device class="8" subclass="6" protocol="80" />
+    <!-- 个别光驱桥接芯片报告 02h（MMC-5/ATAPI）或 05h（SFF-8070i） -->
+    <usb-device class="8" subclass="2" protocol="80" />
+    <usb-device class="8" subclass="5" protocol="80" />
+</resources>

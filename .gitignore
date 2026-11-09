@@ -1,0 +1,19 @@
+# Gradle / Android Studio
+.gradle/
+build/
+/local.properties
+.idea/
+*.iml
+.cxx/
+.externalNativeBuild/
+captures/
+.kotlin/
+.DS_Store
+
+# 本地产物
+/dist/
+
+# 解密相关：密钥库与解密组件永远不进仓库
+KEYDB.cfg
+*.keydb
+plugins/decrypt/out/
