@@ -1,0 +1,538 @@
+# DiskAndroid 开发计划（v1，待确认）
+
+> 平板：Xiaomi Pad 7S Pro（Android 15 / HyperOS 2）｜光驱：BUFFALO BRXL-PTV6U3-SVB（USB 3.x BOT / MMC）
+> 技术栈：Kotlin + Jetpack Compose，minSdk 29，targetSdk 35，NDK
+> 本文档是计划，不含代码。你确认（或修改）后，我从 P0 开始，每个可测节点停下来给你安装/测试/日志说明。
+
+---
+
+## 0. 结论速览
+
+- **云端容器能编译，但连不到你的平板。** JDK 21 已有；Android SDK / NDK / adb / meson 都缺，但都能从官方源下载安装。安装 APK、抓日志要在你那边完成（无线调试 adb，或 CI 产出的 APK + App 内日志导出）。
+- **我已下载并核对了所有第三方库的源码接口：**
+  - libdvdread / libdvdnav / libbluray / libudfread 都有"回调式读块"接口，可以直接接到我们的 ScsiTransport，不用改源码。
+  - **libdvdcss 和 libaacs 在回调模式下不会对光驱做认证**（libdvdcss 的 `dvdcss_use_ioctls()` 在 stream 模式下直接返回 0；libaacs 的 MMC 层只有 linux/darwin/win32 三种设备实现，没有设备路径时 `mmc_open(NULL)` 直接返回空）。两者都要各打一个"SCSI 回调后端"补丁，这是阶段 3 的核心工作量。
+  - libburn 内置的 6 种系统适配器（linux/freebsd/netbsd/solaris/libcdio/dummy）都用不了 USB fd，需要新写一个 `sg-android` 适配器。
+- **Media3 1.11.1 的解复用器对 DVD/BD 不够用**（已读源码确认），必须自写 PS Extractor 和 BD 用的 TS PayloadReader 工厂。详见风险 R4。
+- 计划共 **28 个可测节点**（N0 … N5.2），每个节点都有：代码 + JVM 单元测试（用镜像文件模拟光驱）+ 一页真机测试说明。
+
+---
+
+## 1. 环境检查结果
+
+### 1.1 云端容器（我这边）
+
+| 项目 | 状态 | 说明 |
+|---|---|---|
+| 系统 | Ubuntu 24.04 x86_64，4 核 / 15 GB 内存 / 约 31 GB 可用磁盘 | 编 APK 足够；全部原生库都编出来时磁盘偏紧，需要定期清中间产物 |
+| JDK | ✅ OpenJDK 21 | AGP 9.x 需要 JDK 17+ |
+| Gradle | ✅ 系统自带 8.14.3 | 项目用 wrapper 锁定版本（当前最新 9.9.0） |
+| Android SDK（cmdline-tools / platform-tools / platforms / build-tools） | ❌ 缺 | dl.google.com 可达，可装：platforms android-36/37、build-tools 37.0.0 |
+| NDK | ❌ 缺 | 可装 r30（30.0.16248370）；r28 起默认 16 KB 页对齐 |
+| CMake / Ninja | ✅ 系统自带 | SDK 里的 CMake 4.1.2 也可装 |
+| meson | ❌ 缺 | libdvdread 7.1.1 / libdvdnav 7.0.0 / libdvdcss 1.6.0 / libbluray 1.5.0 / libudfread 1.2.0 **都已改用 meson**；用 pip 装 |
+| autotools | autoconf / automake ✅，libtool ❌ | libaacs 0.12.0、libburn 1.5.8、libgcrypt 仍是 autotools；发布包自带 configure，只有要改 configure.ac 时才需要 libtool（apt 可装） |
+| adb | ❌，**装了也没用** | 容器在云端，连不到你的平板 |
+| 网络 | 大部分可达 | Google Maven / Maven Central / Gradle / VideoLAN / libburnia / gnupg / GitHub（release 下载、git clone）可用；**ffmpeg.org 不通**（连接被重置），改用 GitHub 上的 FFmpeg 镜像（能看到 tag n9.0.2）；codeload.github.com 不通（用 git clone 代替） |
+
+**当前最新稳定版本（2026-11-09 查得，动手时锁定）：** AGP 9.5.1、Gradle 9.9.0、Kotlin 2.4.21、Compose BOM 2026.09.00、Media3 1.11.1、NDK r30、libusb 1.0.30、libudfread 1.2.0、libdvdread 7.1.1、libdvdnav 7.0.0、libdvdcss 1.6.0、libbluray 1.5.0、libaacs 0.12.0、libbdplus 0.2.0、libgcrypt 1.12.4、libgpg-error 1.61、FFmpeg 9.0.2、libburn 1.5.8、libisofs / libisoburn 1.5.8.pl02。
+
+SDK 级别：compileSdk 36（新版 AndroidX 通常要求较高的 compileSdk），targetSdk 35，minSdk 29（按你的要求）。只打 arm64-v8a。
+
+**你确认后我在容器里要做的：** 装 cmdline-tools、platform-tools、platform 36、build-tools、NDK r30、CMake，以及 `pip install meson`。总计约 3–4 GB。
+
+### 1.2 你那边需要准备的
+
+1. **电脑：** Android Studio（最新稳定版，自带 adb）。强烈推荐，用来看 logcat、快速装包。
+2. **平板设置：**
+   - 开发者选项里打开"USB 调试"和"无线调试"。光驱占用唯一的 USB-C 口，所以 adb 只能走 Wi-Fi（Android 11+ 用 `adb pair` 配对，再 `adb connect`）。
+   - HyperOS 的"USB 安装"开关可能要求登录小米账号。
+   - 如果开着"纯净模式"，会拦截不是从应用商店来的 APK，需要关闭或者单次允许。
+   - 建议无线调试用 5 GHz Wi-Fi：USB 3.x 设备会干扰 2.4 GHz。
+   - 省电策略：本 App 设为"无限制"，避免长时间读盘或刻录时被后台限制。
+3. **硬件：** 带 PD 供电的 USB 3.x 扩展坞，光驱的两个 USB 头都插上。
+4. **测试盘（按阶段逐步准备）：**
+   - **P1：** 音乐 CD（最好有一张带 CD-TEXT 的，日版 CD 常有）、CD-ROM 数据盘、DVD-ROM 数据盘、自刻 DVD±R、BD-ROM 或 BD-R 数据盘、一张有划痕的旧盘；有混合模式 / CD-Extra 盘更好。
+   - **P2：** 无加密的 DVD-Video 和 BDMV / AVCHD 盘。可以在电脑上自制，到时我给步骤（例如 ffmpeg + dvdauthor 做 DVD，tsMuxeR 做 BDMV）。
+   - **P3：** 你自己的商业 DVD / BD。
+   - **P4–P5：** CD-RW、DVD-RW、DVD+RW、BD-RE 各一张，加少量 CD-R、DVD±R、BD-R。
+
+### 1.3 每个节点的通用流程：怎么装、怎么测、日志在哪
+
+1. **构建：** 我在容器里编译，跑单元测试（用镜像文件模拟的 FakeDrive），然后 push 到 `claude/jolly-tesla-c2qlm6`。
+2. **拿 APK（两种方式，需要你选）：**
+   - **A（CI）：** GitHub Actions 每次 push 自动编 debug APK，你在平板浏览器里下载 artifact 安装。
+   - **B（本地）：** 你 `git pull` 后，在 Android Studio 里通过无线调试直接 Run。
+   - 为了两种方式装的包能互相覆盖安装，仓库里放一个**仅用于测试的 debug keystore**。否则签名不同就得先卸载，已导入的组件和设置会丢。
+3. **日志：**
+   - **App 内日志面板：** 实时显示，可按级别和模块过滤。
+   - **"导出日志"按钮：** 用 SAF 选位置，保存两个文件：`.log`（人类可读）和 `.jsonl`（机器可读，可以直接转成我这边的回放测试用例）。"分享"按钮走系统分享。
+   - **无线 adb 时：** `adb logcat -s DiskAndroid:V DiskAndroid.SCSI:V DiskAndroid.USB:V`
+   - App 也会在 `Android/data/<包名>/files/logs/` 存一份滚动日志（上限 N MB）。注意 Android 11+ 的文件管理器看不到这个目录，所以以"导出"为主。
+4. **每个节点我给你：** 安装方式、测试步骤、预期结果、要贴回的内容（日志/截图/听感描述）。
+
+---
+
+## 2. 项目结构
+
+包名暂定 `io.github.felixchang67.diskandroid`（可改）。
+
+```
+DiskAndroid/
+├─ app/                        Compose UI、导航、设置、自动播放调度、前台服务、USB intent 入口
+├─ core/
+│  ├─ usb/                     设备枚举、权限、热插拔、接口/备用设置选择、链路速度、掉线/供电诊断
+│  ├─ scsi/                    ScsiTransport 接口；BOT 实现（Kotlin bulkTransfer）；日志装饰器；只读守卫；Sense 解码表
+│  ├─ mmc/                     MMC/SPC 命令构建与解析（纯 Kotlin，无 Android 依赖，可在 JVM 上单测）
+│  ├─ drive/                   DriveSession（唯一命令出口，串行队列）、介质状态机、BlockDevice（预读缓存、重试、坏块表）
+│  ├─ log/                     环形缓冲 + 滚动文件 + 导出/分享
+│  └─ testing/                 FakeDrive：用 ISO / BIN+CUE 模拟 MMC 光驱，可注入坏扇区、NOT READY、中途拔出；日志回放
+├─ feature/
+│  ├─ rip/        (P1)         ISO 读取、坏扇区表（ddrescue mapfile 格式）、SAF 输出
+│  ├─ cdaudio/    (P1)         TOC / 全 TOC、CD-TEXT、CDDA 读取、AudioTrack 引擎
+│  ├─ fs/         (P2)         ISO9660 / Joliet / Rock Ridge（Kotlin）+ UDF（libudfread，JNI）
+│  ├─ video/      (P2/P3)      VIDEO_TS / BDMV 识别、主片选择、Media3 DataSource / Extractor、播放器 UI
+│  ├─ protected/  (P3)         组件导入与加载、CSS / AACS 桥接、地区码
+│  └─ burn/       (P4)         libburnia 绑定、刻录向导、读回校验（P1–P3 的构建里不包含此模块）
+├─ native/
+│  ├─ diskcore/                C ABI 传输层 dc_scsi_exec()、JNI 桥、libusb 后端、块缓存、给第三方库的回调适配
+│  ├─ thirdparty/              版本锁定的源码获取脚本（带 sha256 校验）
+│  ├─ patches/                 第三方库补丁（每个库一个目录，附说明）
+│  └─ build/                   NDK 交叉编译脚本（meson cross file / autotools 环境），统一 16 KB 页对齐
+├─ plugins/decrypt/            可选解密组件（libdvdcss、libaacs+libgcrypt）的构建脚本与补丁；产物不进 APK
+└─ docs/                       本计划、各节点测试说明、日志格式说明
+```
+
+### 2.1 分层
+
+```
+Compose UI ─ ViewModel
+     │
+DriveSession（唯一命令出口；单线程队列；优先级：用户操作 > 播放读 > 后台轮询）
+     │                              │
+MMC 命令层（core/mmc）         BlockDevice（大块预读 / 缓存 / 重试 / 坏块表）
+     │                              │
+ScsiTransport ◄─ ReadOnlyGuard ◄─ LoggingTransport ◄─ [ BotKotlinTransport | NativeTransport(libusb) ]
+                                                            │
+                     native/diskcore: dc_scsi_exec() ◄── libudfread / libdvdread / libdvdnav / libbluray 的读块回调
+                                                     ◄── 解密组件（libdvdcss / libaacs）经 host API 回调
+                                                     ◄── libburn 的 sg-android 适配器（P4）
+```
+
+### 2.2 ScsiTransport（示意，非最终代码）
+
+```kotlin
+interface ScsiTransport : Closeable {
+    val info: TransportInfo                       // VID/PID、接口号、端点、链路速度、后端名
+    fun execute(cmd: ScsiCommand): ScsiResult     // 同步；串行由 DriveSession 保证
+}
+class ScsiCommand(val cdb: ByteArray, val dir: Dir /* NONE | IN | OUT */,
+                  val buf: ByteArray?, val offset: Int, val length: Int, val timeoutMs: Int)
+sealed interface ScsiResult {
+    data class Good(val transferred: Int, val residue: Int) : ScsiResult
+    data class CheckCondition(val sense: Sense, val transferred: Int) : ScsiResult
+    data class TransportError(val kind: Kind /* Timeout|Stall|PhaseError|DeviceGone|Io */,
+                              val detail: String) : ScsiResult
+}
+```
+
+### 2.3 BOT 传输要点（对照 USB Mass Storage Class Bulk-Only Transport 1.0）
+
+- **CBW / CSW：** CBW 31 字节（签名 `USBC`，Tag 递增，同时作为日志序号）；CSW 13 字节（签名 `USBS`）。校验签名、Tag、Residue。
+- **自动取 sense：** CSW 状态为 1（Failed）时，自动发 REQUEST SENSE（BOT 没有 auto-sense）。
+- **错误恢复：**
+  - Data-In 阶段 STALL：先清该端点的 HALT，再读 CSW。
+  - Phase Error、CSW 无效、超时：执行 Reset Recovery，即 Bulk-Only Mass Storage Reset（类请求 FFh），再对两个端点清 HALT。
+- **桥接芯片兼容：** 有的桥接芯片在数据阶段直接发 CSW；如果 Data-In 收到 13 字节、以 `USBS` 开头且 Tag 匹配，就按 CSW 处理并记一条警告。
+- **Get Max LUN（FEh）：** 有的设备会 STALL 这个请求，按 LUN 0 处理。有多个 LUN 时，选 INQUIRY 外设类型为 05h（CD/DVD）的那个。
+- **Android API 的坑：**
+  - `bulkTransfer()` 失败只返回 -1，分不清 STALL、超时还是拔出。处理方式：失败后先查设备还在不在 `UsbManager.deviceList`，不在就判定拔出，在就按 STALL 处理。
+  - 清 HALT 没有公开 API，只发 CLEAR_FEATURE 控制传输不一定会复位主机侧的 data toggle。所以 P1 会带一个约 30 行的极小 JNI：`ioctl(fd, USBDEVFS_CLEAR_HALT)`、`USBDEVFS_RESET`（最后手段）、`USBDEVFS_GET_SPEED`（精确链路速度）。**数据收发仍然是纯 Kotlin 的 bulkTransfer。**
+  - 换 libusb 后端的主要收益正在这里：错误码精确（PIPE / NO_DEVICE / TIMEOUT）。
+- **单命令传输长度：** 默认 32 扇区（64 KiB）。有的 USB-SATA 桥对单命令长度有上限（Linux usb-storage 默认 240 扇区），超了可能挂死。真机测吞吐后再调。
+
+### 2.4 日志格式
+
+每条命令记录：序号/Tag、时间戳、CDB hex、方向/长度、超时、耗时、CSW 状态、Residue、sense（原始 hex + SK/ASC/ASCQ 中文解码），以及当前状态机状态。
+
+- **数据载荷：** ≤ 512 字节的全量 hex；读扇区类只记前 64 字节 + CRC32；**密钥交换类（P3）载荷默认打码**，CDB 和 sense 照常记录。
+- **掉线时：** 把掉线前最后 50 条命令连同 USB 事件一起落盘。
+
+### 2.5 只读守卫（P1–P3）
+
+**用白名单而不是黑名单**：只放行已登记的命令，其余一律在发出前拒绝并记日志。P1–P2 不允许任何 Data-Out 命令。
+
+| 操作码 | 命令 | 阶段 | 备注 |
+|---|---|---|---|
+| 00h | TEST UNIT READY | P1 | |
+| 03h | REQUEST SENSE | P1 | |
+| 12h | INQUIRY | P1 | |
+| 1Bh | START STOP UNIT | P1 | 仅启动、停止、弹出、装载 |
+| 1Eh | PREVENT ALLOW MEDIUM REMOVAL | P1 | 锁托盘，主要给 P4 用 |
+| 25h | READ CAPACITY | P1 | |
+| 28h / A8h | READ(10) / READ(12) | P1 | READ(12) 置 Streaming 位用于视频播放 |
+| 42h | READ SUB-CHANNEL | P1 | MCN / ISRC |
+| 43h | READ TOC/PMA/ATIP | P1 | 格式 0 / 1 / 2 / 5 |
+| 46h | GET CONFIGURATION | P1 | |
+| 4Ah | GET EVENT STATUS NOTIFICATION | P1 | Polled，Media 类事件 |
+| 51h | READ DISC INFORMATION | P1 | |
+| 52h | READ TRACK INFORMATION | P1 | |
+| 5Ah | MODE SENSE(10) | P1 | 能力页 2Ah |
+| A4h | REPORT KEY | P1 | P1 只用格式 08h（读 RPC 地区状态）；P3 开放 CSS/AACS 相关格式 |
+| ACh | GET PERFORMANCE | P1 | |
+| ADh | READ DISC STRUCTURE | P1 | |
+| BBh | SET CD SPEED | P1 | 降低转速：降噪、降电流 |
+| BDh | MECHANISM STATUS | P1 | |
+| BEh | READ CD | P1 | |
+| A3h | SEND KEY | P3 | 仅 CSS / AACS 认证格式；**Key Format 06h（设置地区码）永久拦截** |
+
+以上操作码已与 Linux `include/uapi/linux/cdrom.h` 交叉核对；CDB 字段细节在实现时逐条对照 MMC-6 / SPC-4，并参考 libdvdcss、libaacs、libburn、libcdio 等成熟实现中已在真实光驱上验证过的写法。
+
+### 2.6 介质状态机
+
+```
+NoDevice → NoPermission → Connected → [INQUIRY → TUR]
+   ├─ 02/3A/xx 无盘（01 托盘关 / 02 托盘开）
+   ├─ 02/04/01 正在就绪 → 轮询 TUR（间隔递增，上限可设，默认 30 s）
+   ├─ 06/28/00 换盘（UNIT ATTENTION） → 重新识别
+   ├─ 06/29/xx 上电/复位 → 若会话中途出现且不是我们发起的 → 记为疑似供电问题
+   └─ Ready → GET CONFIGURATION / READ TOC / … → 分类：音乐 CD｜数据盘｜DVD-Video｜BDMV → 自动播放判定
+```
+
+GET EVENT STATUS NOTIFICATION 每秒轮询一次（插在读命令之间），检测"弹出请求 / 新盘 / 盘被拿走"。
+
+---
+
+## 3. 阶段任务拆分与依赖
+
+相对工作量：S < M < L < XL。
+
+### P0 工程骨架（S）
+
+- 容器装工具链；Gradle 多模块骨架 + 版本目录；Compose 空壳；FakeDrive 雏形；CI（如你同意）；测试 keystore；docs。
+- **N0：** 装 APK → 打开显示"未连接光驱" → 打通无线 adb 和"导出日志"流程。
+
+### P1 只读（L）——严禁任何写盘命令
+
+**N1.1 USB 枚举与权限**
+
+- `device_filter.xml` 初期按 class 8 匹配。拿到 VID/PID 后收窄，避免插 U 盘也弹出本 App；同时可在设置里开关"对所有 USB 存储设备弹出"（用 activity-alias 运行时启用/禁用实现）。
+- `USB_DEVICE_ATTACHED` 拉起 App；Activity 用 singleTask，`onNewIntent` 处理重复插入。
+- 申请权限（Android 14+ 要求显式 Intent + FLAG_MUTABLE）；被拒绝时给出引导和重试按钮。
+- 处理热插拔（ATTACHED / DETACHED 广播）。
+- 选接口：08/06/50；如果存在 UAS（协议 62h）备用设置，显式切到 BOT 备用设置；subclass 为 02h / 05h 时兼容但告警。
+- `claimInterface(force = true)`：会把内核 usb-storage 驱动踢开（Android 的存储服务会先尝试挂载它，失败是正常的）。
+- 链路速度：bulk 端点 wMaxPacketSize 1024 = USB3 SuperSpeed，512 = USB2 High-Speed；JNI 用 `USBDEVFS_GET_SPEED` 再确认。
+- 显示原始描述符。
+
+**N1.2 BOT 传输 + 基础命令**
+
+- INQUIRY：确认外设类型 05h，读出真实机芯厂商、型号、固件版本。
+- TUR / REQUEST SENSE / 状态机。
+- GET CONFIGURATION：Profile 列表、当前 Profile、关键 Feature（Removable Medium、CD Read、DVD Read、BD Read、Real-Time Streaming、DVD CSS、AACS…）。
+- MODE SENSE 2Ah、GET PERFORMANCE、MECHANISM STATUS、GESN。
+- REPORT KEY 格式 08h：读 DVD 地区状态（只读，提前暴露 P3 的地区码风险）。
+
+**N1.3 盘片信息**
+
+- READ CAPACITY、READ TOC（格式 0 / 1 / 2）、READ DISC INFORMATION、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理格式和版权信息；BD 盘信息）。
+- 识别盘片类型：CD-DA / CD-ROM / CD-R / CD-RW、DVD-ROM / ±R / ±RW / DL、BD-ROM / R / RE / BDXL，以及层数、会话数、空白/可追加/已关闭状态。
+
+**N1.4 读成 ISO**
+
+- **大小判定：** READ CAPACITY 与 TOC、轨道信息、文件系统卷大小交叉核对，差异写日志。TAO 轨道末尾 2 个 run-out 扇区、多区段盘的区段间隙，标记为"间隙"补零，不计为坏扇区。
+- **读取策略（类 ddrescue 两遍）：**
+  - 第 1 遍：大块读，遇错跳过。
+  - 第 2 遍：对坏区逐扇区重试 N 次（可设），仍失败则补零并记录。
+- **输出：** ISO、`.log`、ddrescue 格式 mapfile。SAF 选目录，流式写入，不整盘进内存。
+- **界面：** 进度、速度（MB/s 和 CD/DVD/BD 倍速）、可取消。
+- **中途拔出：** 保留已写部分，标记为不完整（后续可做续读）。
+- **系统要求：**
+  - 前台服务用 `connectedDevice` 类型（不用 dataSync，Android 15 对 dataSync 有每 24 h 共 6 h 的限制）。
+  - 开始前检查可用空间；大于 4 GB 写入失败时提示可能是 FAT32 目标。
+
+**N1.5 音乐 CD 播放**
+
+- **轨道识别：**
+  - TOC 的 CONTROL 位区分音轨和数据轨；混合模式盘跳过数据轨。
+  - CD-Extra：用全 TOC 中会话 1 的 lead-out 确定最后一首音轨的结尾；拿不到时回退为"下一会话起点 − 11400 扇区"。
+- **CD-TEXT：** READ TOC 格式 5，先读 4 字节头再读全量。字符集按规范支持 ISO-8859-1 / ASCII / MS-JIS，必要时猜测 GBK。没有 CD-TEXT 显示"Track N"。
+- **读取：** READ CD（BEh）用户数据 2352 字节 / 扇区，可选 C2 错误指针。
+  - 字节序：默认小端，用 cdparanoia 式启发检测，设置里可手动覆盖。
+  - 播放时可选降速（SET CD SPEED）以降噪、降电流。
+- **播放：**
+  - AudioTrack 16-bit / 44.1 kHz / 立体声；读线程 + 约 5 秒环形缓冲。
+  - 支持上一首、下一首、暂停、拖动进度。
+- **坏扇区：** 补静音并做几毫秒淡入淡出防爆音，同时写日志。任何读超时都不阻塞 UI 和音频线程。
+- **系统集成：** 音频焦点；耳机拔出时暂停；前台服务 `mediaPlayback`，息屏继续播。
+- **预加重：** 有预加重标志位时先记日志，暂不做去加重滤波。
+
+**N1.6 整合与 P1 版自动播放**
+
+- 主界面：设备状态、盘片信息、读取按钮、播放控制、日志面板。
+- 插入音乐 CD 时：显示"2 秒后播放 [取消] [立即播放]"横幅，起播约 1 秒淡入。
+- 弹盘或拔线：立即停播并释放资源。
+- 供电诊断提示（见风险 R1）。
+
+### P2 文件系统与未加密视频盘（L）——依赖 P1 的 BlockDevice；从这里起引入 NDK 第三方库
+
+**N2.1 文件浏览**
+
+- ISO9660 / Joliet（中文文件名）/ Rock Ridge 用 Kotlin 自写；非标准 GBK 文件名做回退。
+- UDF 用 libudfread（支持到 2.50 metadata 分区，BD 必需）。libudfread 不支持 VAT 和可备用分区（即包写入的 CD-RW / DVD-RW、UDF 1.5 CD-R），遇到时给出明确提示。
+- 文件浏览 UI；可把单个文件原样导出到 SAF。
+
+**N2.2 视频结构识别 + 主片选择**
+
+- **DVD：** VIDEO_TS → libdvdread（`DVDOpenStream2` 回调，不加载 libdvdcss）解析 IFO：每个标题的 PGC 时长、章节、音轨/字幕属性。按你的规则取时长最长的标题。
+- **BD：** BDMV（也识别 AVCHD 目录结构）→ libbluray（`bd_open_stream` 回调）列出 PLAYLIST/*.mpls 的时长，取最长；`bd_get_main_title()` 的结果作为参考，两者不同时在日志里标出。
+- 候选列表 UI，可手动改选。
+
+**N2.3 DVD 播放**
+
+- **DataSource：** 通过 libdvdread 按 PGC 的 cell 顺序读取标题 VOB 扇区。
+  - 这条路径到 P3 会自动经过 libdvdcss 解密，不用重写。
+- **自写 PS Extractor：** 拆分 private stream 1 的子流（AC-3 80–87h、DTS 88–8Fh、LPCM A0–A7h、字幕 20–3Fh）。
+- **SeekMap：** 用 IFO 时间表一次定位，避免二分查找带来的多次寻道。
+- **解码：**
+  - MPEG-2：设备 MediaCodec（运行时列出解码器并写日志）。
+  - AC-3：设备没有对应解码器时，走 Media3 FFmpeg 音频扩展。
+
+**N2.4 BD 播放**
+
+- **DataSource：** 读 libbluray `bd_read()` 输出的主播放列表 M2TS 流（同样到 P3 自动经过 libaacs 解密）。
+- **192 → 188 字节适配。**
+- **自定义 HDMV 流类型映射：** 80h LPCM、81h AC-3、82h DTS、83h TrueHD、84h E-AC-3、85h / 86h DTS-HD、90h PGS、EAh VC-1、1Bh AVC。
+- **SeekMap：** 用 libbluray 的 EP_map。
+- **字幕：** PGS 用 Media3 自带的 PgsParser。
+
+**N2.5 自动播放（完整规则）**
+
+- 有音轨的 CD → 播放音轨；DVD/BD 检测到 VIDEO_TS 或 BDMV → 播放主片；其他数据盘 → 进入文件浏览。
+- 设置开关（默认开）、起播前提示、弹盘/拔线立即释放。
+
+*可选加项：* VCD / SVCD（Mode 2 Form 2 的 MPEG-1/2，国内常见），READ CD 读出后交给 PS Extractor 播放。
+
+### P3 商业光盘兼容，仅限个人播放（XL）——依赖 P2 播放管线
+
+> 解密组件是否合法取决于你所在地的法律。按你的设计：组件不随 App 分发、只做边读边播、不提供解密导出、"读成 ISO"对加密盘保持原始密文——这些我会在代码层面强制执行（例如 rip 模块根本不链接任何解密路径）。
+
+**N3.0 原生传输层**
+
+- libusb 1.0.30，`LIBUSB_OPTION_NO_DEVICE_DISCOVERY` + `libusb_wrap_sys_device(fd)`。
+- 与 Kotlin 后端并存，设置里可切换；同一套日志格式；对比吞吐与稳定性。
+- 定义插件 host API（`dc_host_api`：版本号、`scsi_exec`、`log`），组件导出 `dc_plugin_init()` 接收它。不依赖全局符号。
+
+**N3.1 组件导入与加密检测**
+
+- **导入：** SAF 选 .so 或 KEYDB.cfg → 复制到 `files/plugins/` → 设为只读（Android 14+ 动态代码加载要求）→ 校验 ELF 为 arm64 并检查导出符号和版本 → 用绝对路径加载。
+- **检测：** CSS 看 READ DISC STRUCTURE 01h 的版权保护类型；AACS 看 AACS 目录 + GET CONFIGURATION 的 AACS Feature。
+- **组件缺失时：** 提示"该盘有版权保护，需要启用解密组件"。
+
+**N3.2 地区码**
+
+- 读光驱 RPC 状态（RPC-1 / RPC-2、当前地区、剩余可改次数）和盘片地区，不匹配时明确提示。
+- 绝不修改地区码：SEND KEY 06h 在守卫层被永久拦截。
+- BD 的地区码不由光驱强制，而由播放器设置和盘上程序检查；直接播放主片时一般不受影响。
+
+**N3.3 libdvdcss 补丁 + CSS 认证 + 主片解密播放**
+
+- **补丁：** 给 ioctl 层新增"回调 SCSI"平台后端，使 stream 模式也能完成 AGID → Challenge → Key1/Key2 → 盘钥 / 标题钥。
+- **加载：** libdvdread 按 soname `libdvdcss.so.2` dlopen；我们先用绝对路径预加载组件，不行再给 libdvdread 打一行补丁。
+- `DVDCSS_CACHE` 指向私有目录。
+- **sense 解码为中文提示：** 6F/00 认证失败、6F/01 密钥不存在、6F/02 密钥未建立、6F/03 未认证读取加密扇区、6F/04 地区不符、6F/05 地区设置次数问题。
+
+**N3.4 DVD 音轨 / 字幕切换**
+
+- PS Extractor 已经拆好子流，音轨/字幕直接映射为 Media3 的轨道选择。
+- VobSub 字幕用 IFO 里的调色板渲染。
+
+**N3.5 DVD 菜单（libdvdnav）——先做技术验证 spike，再定方案**
+
+- 难点：静帧（STILL_FRAME）、跳转时冲刷解码器（HOP_CHANNEL）、cell 间时间戳不连续、按钮高亮叠加层。
+- **方案 A：** 自定义 MediaSource + 时间戳重定基 + Compose 叠加层绘制按钮。
+- **方案 B（A 不可行时）：** 自建管线（MediaCodec + AudioTrack + 自己做音画同步）。
+- spike 完成后把结论和工作量给你，再决定。
+
+**N3.6 libaacs 补丁 + AACS 认证**
+
+- **依赖：** libaacs 依赖 libgcrypt + libgpg-error，交叉编译后静态链入，组件只有一个 `libaacs.so` 文件。
+- **补丁：** 新增 Android MMC 设备后端，把 `device_send_cmd` 转到 host API；`mmc_open(NULL)` 时使用回调设备。这样 libbluray 的 `bd_open_stream` 不用改。
+- **路径：** `XDG_CONFIG_HOME` 指向私有目录（libaacs 在 `$XDG_CONFIG_HOME/aacs/KEYDB.cfg` 找密钥库）；`LIBAACS_PATH` 指向导入的组件（libbluray 1.5.0 原生支持这个环境变量）。
+- **错误分级提示：**
+  - 光驱没有 AACS Feature → "该光驱不支持 AACS"。
+  - 主机认证时返回 CHECK CONDITION → "该光驱不支持此盘的认证"，原始 sense 全量写日志。
+  - AACS 2.0（libaacs 识别为内容证书类型 10h）→ "不支持 AACS 2.0（4K UHD）"。
+  - BD+（libbluray 的 `bdplus_detected`）→ 提示可能花屏（libbdplus 暂不纳入）。
+
+**N3.7 BD 主片解密播放**
+
+- 复用 N2.4 的管线。
+- 针对"播放列表混淆"（大量时长相同的 MPLS）：启发式检查（片段顺序、重复片段）+ 手动选择。
+
+### P4 刻录（XL）——依赖 P1 和 N3.0；技术上不依赖 P3，如果想先做刻录可以和 P3 对调
+
+- **N4.0 只读的写能力检测：** GET CONFIGURATION 的写相关 Feature、GET PERFORMANCE 写速度、盘片空白/可追加状态。这一步**仍然不发任何写命令**。
+- **N4.1 libburnia 编译 + 适配器：** NDK 编 libburn / libisofs / libisoburn；新写 `sg-android.c`（参照 sg-dummy.c 的 359 行接口：`sg_grab` / `sg_release` / `sg_issue_command` / `sg_give_next_adr` …），接到 diskcore 传输层。先只跑 libburn 的查询功能，与 N4.0 的结果对照。
+- **N4.2 模拟刻录：** Test Write 只有 CD-R 和 DVD-R 支持（DVD+R / BD 不支持模拟）。不烧盘就能把全流程跑一遍。
+- **N4.3 RW 盘真实刻录：** CD-RW / DVD-RW / DVD+RW / BD-RE。刻 ISO 文件 → 读回 → 逐扇区比对 SHA-256。
+- **N4.4 一次性盘：** CD-R、DVD±R，再到 BD-R（BDXL 视光驱和盘的支持情况）。
+- **N4.5 从文件夹直接刻：** 用 libisofs 现场生成 ISO 流式刻录，不落地临时文件；多区段追加作为可选项。
+- **安全措施：**
+  - 刻录前二次确认：显示盘片类型、容量、写入大小、速度、是否可擦写。
+  - 刻录中：前台服务、屏幕常亮、锁托盘（PREVENT），拦截返回键误触。
+  - 电量低于 30% 且未在充电时拒绝开始。
+  - 必须在 N1.6 的供电诊断验证通过后才开始 P4。
+  - 完成后自动读回校验；每种失败都给出可理解的原因。
+- **许可证：** libburnia 是 GPL，见风险 R9。
+
+### P5 音频 CD 抓轨与刻录（M–L）——依赖 P4 和 N1.5
+
+- **N5.1 抓轨：**
+  - 安全抓取：重叠读 + 重读比对（cdparanoia 思路）。
+  - 读偏移校正：各型号光驱的偏移值可查 AccurateRip 数据。
+  - 输出 WAV / FLAC（Android 自带 FLAC 编码器）到 SAF。
+  - 元数据来自 CD-TEXT；MusicBrainz 和 AccurateRip 校验为可选的联网功能。
+- **N5.2 音频 CD 刻录：** MediaExtractor + MediaCodec 解码任意音频 → 重采样为 44.1 kHz / 16 bit / 立体声 → libburn SAO 写入（曲间 2 秒或 0 秒、CD-TEXT）。先用 CD-RW 测试。
+
+### 3.1 依赖关系
+
+```
+P0 → N1.1 → N1.2 → N1.3 ─┬─ N1.4（ISO）
+                         └─ N1.5（CD 音频）→ N1.6（整合）
+N1.3 → N2.1（引入 NDK）→ N2.2 ─┬─ N2.3（DVD）─┐
+                               └─ N2.4（BD）──┴─ N2.5（自动播放）
+N2.x → N3.0（libusb）→ N3.1 ─┬─ N3.2 → N3.3 → N3.4 → N3.5（菜单 spike）
+                             └─ N3.6 → N3.7
+N3.0 + N1.6 → N4.0 → N4.1 → N4.2 → N4.3 → N4.4 → N4.5
+N4.x + N1.5 → N5.1 / N5.2
+```
+
+### 3.2 原生库编译与适配（全部 arm64-v8a、NDK r30、API 29、`-Wl,-z,max-page-size=16384`）
+
+| 库 | 版本 | 许可 | 构建 | 位置 | 适配 / 补丁 |
+|---|---|---|---|---|---|
+| libusb | 1.0.30 | LGPL-2.1+ | CMake（自写） | APK | 无，用 `libusb_wrap_sys_device` |
+| libudfread | 1.2.0 | LGPL-2.1+ | meson | APK | 无，用 `udfread_block_input` 回调 |
+| libdvdread | 7.1.1 | GPL-2.0+ | meson | APK | `DVDOpenStream2` 回调；libdvdcss 加载方式（预加载，必要时一行补丁） |
+| libdvdnav | 7.0.0 | GPL-2.0+ | meson | APK | `dvdnav_open_stream2` 回调 |
+| libbluray | 1.5.0 | LGPL-2.1+ | meson（关闭 BD-J / Java） | APK | `bd_open_stream` 回调；`LIBAACS_PATH` |
+| FFmpeg | 9.0.2（GitHub 镜像） | LGPL-2.1+（不启用 GPL 组件） | configure | APK | 只编 AC-3 / E-AC-3 / DTS / TrueHD 等音频解码器，供 Media3 decoder_ffmpeg 使用 |
+| libdvdcss | 1.6.0 | GPL-2.0+ | meson | **外部组件** | **补丁：回调 SCSI 后端**（stream 模式原本不认证） |
+| libaacs（+ libgcrypt 1.12.4、libgpg-error 1.61） | 0.12.0 | LGPL-2.1+ | autotools | **外部组件** | **补丁：Android MMC 设备后端**；libgpg-error 需为 aarch64-linux-android 生成 lock-obj 头 |
+| libburn / libisofs / libisoburn | 1.5.8 / 1.5.8.pl02 | GPL-2.0+ | autotools | APK（burn 模块） | **新写 `sg-android.c` 系统适配器** |
+| libbdplus | 0.2.0 | LGPL | — | 不纳入 | 只检测并提示 |
+
+---
+
+## 4. 风险点
+
+### R1 供电（你点名的）
+
+- **现象：**
+  - 起转、寻道、刻录时电流峰值导致掉线：DETACHED 后几秒内又 ATTACHED。
+  - 光驱自身欠压复位：会话中突然出现 06/29/xx（上电/复位），而 USB 并没有断开。
+  - 读命令连续超时。
+- **对策：**
+  - 掉线分类器：命令进行中掉线、起转后 N 秒内掉线、30 秒内反复插拔、出现非我方发起的 06/29 复位——任一命中即判定为"疑似供电不足"。
+  - 弹出指定提示："请检查带供电的扩展坞 / Boost 线"，并提醒光驱的两个 USB 头都要插上。
+  - 日志附上掉线前的最后 50 条命令。
+  - 读盘时可选"降速重试"（SET CD SPEED 降低电流）。
+  - P4 前做一次"起转 + 全速读 30 秒"的供电自检。
+- **限制：**
+  - Android 读不到 VBUS 电流，只能间接推断。
+  - 刻录中掉电会废掉一次性盘，所以供电诊断必须在 P4 前验证。
+
+### R2 BD 的 AACS 认证（你点名的）
+
+- **认证失败最常见的原因与 USB 无关：** 公开流传的主机证书大多已被新盘携带的主机吊销列表（HRL）吊销，光驱会把新盘上的 HRL 存进固件，之后用这些证书认证就会失败。表现为"光驱不支持此盘的认证"。
+- **不需要驱动认证的情形：** KEYDB 里有该盘的 VUK，且盘没开总线加密。
+- **需要认证的情形：** 需要读 Volume ID，或盘开了总线加密（要读 Read Data Key）。
+- **我们的做法：** 把认证每一步的 CDB 和 sense 全量写进日志，供你判断是否为固件限制；不涉及刷固件。
+- **AACS 2.0（UHD）：** libaacs 能识别但不支持，直接提示。
+- **BD+：** 没有 libbdplus，只能检测并提示。
+- **主片识别：** 部分商业 BD 用播放列表混淆，"取最长"可能选错，需要候选列表 + 启发式 + 手动选。
+
+### R3 地区码（你点名的）
+
+- **DVD：**
+  - RPC-2 光驱在固件里强制地区；地区不符时光驱拒绝读取加密扇区（6F/04）。我们只读取 RPC 状态并提示，不修改。
+  - BUFFALO 是日本品牌，出厂可能设为地区 2 或"未设置"；部分固件在未设置时同样拒绝读加密扇区。如需设置地区（会消耗有限的修改次数），由你在电脑上用官方方式自行决定。
+  - **N1.2 就会读出 RPC 状态，提前暴露这个风险。**
+- **BD：** 地区码不由光驱强制；绕过菜单直接播主片一般不受影响。
+
+### R4 ExoPlayer 自定义 DataSource 性能（你点名的）
+
+- **寻道：** 光驱随机寻道 100–200 ms+，起转 1–3 s。Media3 对 TS/PS 默认用 PCR/SCR 二分查找 seek，一次拖动会触发多次寻道，延迟秒级。→ DVD 用 IFO 时间表、BD 用 CLPI 的 EP_map 做 SeekMap，一次定位。
+- **小块读：** Extractor 读得很碎。→ 下层 BlockDevice 做大块预读（256 KB–1 MB）+ 缓存；单命令长度受桥接芯片限制，真机调优。
+- **BOT 串行：** 播放读、GESN 轮询、UI 查询共用一条通道。→ DriveSession 优先级队列，读请求切小块。
+- **带宽不是瓶颈：** DVD 最高 10.08 Mbit/s，BD 最高 48 Mbit/s（约 6 MB/s），USB3 和 BD 6x（约 27 MB/s）都够。瓶颈是寻道、起转和空闲降速。→ 加大 LoadControl 缓冲并持续预读。
+- **Media3 1.11.1 解复用器缺口（已读源码确认）：**
+  - `PsExtractor` 把整个 private stream 1（0xBD）交给一个 Ac3Reader，多音轨、DTS、LPCM、字幕会混成一路。
+  - `TsExtractor` 固定 188 字节包（`TS_PACKET_SIZE = 188`），不认 BD 的 192 字节包。
+  - 流类型 80h 在 Media3 里是 DigiCipher II 视频、86h 是 SCTE-35，而在 BD 里分别是 LPCM 和 DTS-HD MA；Media3 也没有 TrueHD（83h）、PGS（90h）、VC-1（EAh）的映射。
+  - → 自写 PS Extractor 和 HDMV PayloadReader 工厂（N2.3 / N2.4 已计入）。
+- **解码器：**
+  - MPEG-2：依赖设备 MediaCodec。AOSP 自带软解，但厂商可能裁剪，需要 N2.3 真机确认。
+  - VC-1（部分早期 BD）：Android 基本没有解码器，可能无法播放；要支持只能自接 FFmpeg 视频解码，工作量大。
+  - DTS / TrueHD：走 FFmpeg 音频扩展。
+
+### 其他风险
+
+- **R5 Android USB 栈：** `bulkTransfer` 不给 errno；清 HALT 无公开 API；桥接芯片怪癖（提前发 CSW、Get Max LUN 时 STALL、单命令长度上限）；UAS 备用设置；HyperOS 可能对 OTG 有省电策略，需要真机观察。
+- **R6 DVD 菜单与 ExoPlayer 的整合：** 静帧、跳转冲刷、时间戳重定基、按钮高亮。这是 P3 最大的工程风险，所以先做 spike。
+- **R7 补丁维护：** libdvdcss / libaacs 的补丁要随上游版本维护；libgcrypt / libgpg-error 交叉编译较繁琐。
+- **R8 外部组件加载：** Android 14+ 要求动态加载的文件为只读；不 root 的平板上用户无法直接往私有目录放文件。→ App 提供"导入组件"（KEYDB.cfg 同理）。
+- **R9 许可证：** libdvdread / libdvdnav / libdvdcss / libburnia 是 GPL；Media3 是 Apache-2.0（与 GPLv2-only 不兼容，与 GPLv3 兼容）。→ 建议整个项目用 GPL-3.0-or-later。自用无影响；若公开发布需开源。
+- **R10 CDDA 细节：** 字节序（少数光驱为大端）；读偏移（播放无所谓，抓轨要校正）；预加重。
+- **R11 测试受限：** 我接触不到真机，所有 USB / 时序 / 固件问题都依赖你的日志。→ 日志可回放成测试用例，FakeDrive 覆盖逻辑分支。
+- **R12 系统限制：** Android 15 对 dataSync 前台服务有时长限制（我们用 connectedDevice / mediaPlayback）；HyperOS 后台策略；刻录全程屏幕常亮。
+- **R13 文件系统：** libudfread 不支持包写入格式；非标准 GBK 文件名。
+
+---
+
+## 5. 真机测试 / 日志节点汇总
+
+| 节点 | 你要做的 | 需要的盘 / 条件 | 贴回给我 |
+|---|---|---|---|
+| N0 | 安装、打开、导出一次日志 | — | 安装是否被 HyperOS 拦截；导出的日志 |
+| N1.1 | 插拔光驱 5 次；拒绝一次权限再同意 | 无盘 | 设备信息页（VID/PID、接口、端点、链路速度）+ 日志 |
+| N1.2 | 无盘 / 开托盘 / 依次放 CD、DVD、BD | 各一张 | 光驱信息页（INQUIRY、Profile、Feature、RPC 状态）+ 状态变化日志 |
+| N1.3 | 每种盘点"盘片信息" | 尽量多类型 | 盘片信息导出 |
+| N1.4 | 读一张 CD-ROM 和一张 DVD 成 ISO，在电脑上算 SHA-256 比对；读到一半拔线一次；读一张划痕盘；试 16 / 32 / 64 / 128 扇区块大小 | 最好有已知校验值的盘 | 速度、日志、坏扇区表、比对结果 |
+| N1.5 | 音乐 CD：切歌、暂停、拖动；划痕盘；播放中弹盘；播放中拔线 | 音乐 CD（带 CD-TEXT 更好）、混合模式盘（如有） | 听感（杂音 / 爆音 / 卡顿）+ 日志 |
+| N1.6 | 插盘自动播放；关闭自动播放；（可选）拔掉扩展坞电源复现掉线 | — | 提示是否出现 + 日志 |
+| N2.1 | 浏览各类数据盘，导出一个文件 | Joliet 中文名 CD-R、UDF DVD、BD-R | 目录截图 + 日志 |
+| N2.2 | 查看主片识别结果 | 自制 DVD-Video、自制 BDMV / AVCHD | 候选列表截图 |
+| N2.3 | DVD 起播、拖动、切音轨 | 自制 DVD-Video | 起播 / 拖动耗时、解码器列表日志 |
+| N2.4 | BD 起播、拖动 | 自制 BDMV | 同上 |
+| N2.5 | 三类盘的插盘自动行为 | 音乐 CD / DVD / 数据盘 | 是否符合规则 |
+| N3.0 | 切到 libusb 后端重测 N1.4 | 同 N1.4 | 两种后端的吞吐与稳定性对比 |
+| N3.1 | 未导入组件时插加密盘；导入组件 | 商业 DVD / BD | 提示截图 + 日志 |
+| N3.2 | 查看地区状态 | 不同地区的 DVD（如有） | RPC 状态日志 |
+| N3.3–N3.4 | 播放商业 DVD 主片，切音轨 / 字幕 | 商业 DVD | 认证日志（载荷已打码）+ 播放情况 |
+| N3.5 | 菜单导航（spike 后） | 带菜单的 DVD | 操作录屏 / 描述 |
+| N3.6–N3.7 | 导入 KEYDB；播放商业 BD | 新旧不同年份的 BD 各一张 | AACS 认证全过程日志（含原始 sense） |
+| N4.0–N4.1 | 查看写能力报告 | 空白盘 | 报告导出 |
+| N4.2 | 模拟刻录 | CD-R / DVD-R | 日志 |
+| N4.3 | RW 盘真实刻录 + 读回校验 | CD-RW / DVD±RW / BD-RE | 日志 + 校验结果 |
+| N4.4–N4.5 | 一次性盘刻录 | CD-R / DVD±R / BD-R | 日志 + 校验结果 + 电脑读取结果 |
+| N5.1–N5.2 | 抓轨；刻音乐 CD | 音乐 CD、CD-RW | 文件比对 / 听感 + 日志 |
+
+---
+
+## 附录 A：常用 Sense 码（SK/ASC/ASCQ）与中文提示
+
+| SK/ASC/ASCQ | 含义 | App 行为 |
+|---|---|---|
+| 02/04/01 | 正在就绪 | 继续轮询 |
+| 02/3A/00、01、02 | 无盘（托盘关 / 托盘开） | 显示"请放入光盘" |
+| 06/28/00 | 介质可能已更换 | 重新识别 |
+| 06/29/xx | 上电 / 复位 | 会话中途出现 → 疑似供电问题 |
+| 03/11/xx | 无法恢复的读错误（05 L-EC、06 CIRC） | 重试 → 补零或静音 + 坏扇区记录 |
+| 05/20/00 | 不支持的命令 | 降级处理 + 记录 |
+| 05/21/00 | LBA 越界 | 检查大小判定 |
+| 05/24/00 | CDB 字段无效 | 记录（多为实现问题） |
+| 05/30/02 | 无法读取：格式不兼容 | 提示盘片 / 光驱不兼容 |
+| 05/64/00 | 该轨道模式下非法（如对音轨发 READ(10)） | 改用 READ CD |
+| 05/6F/00–05 | 版权保护：认证失败 / 密钥不存在 / 未建立 / 未认证读加密扇区 / 地区不符 / 地区设置次数 | P3 对应中文提示 |
