@@ -6,6 +6,7 @@ import io.github.felixchang67.diskandroid.core.scsi.ScsiCommand
 import io.github.felixchang67.diskandroid.core.scsi.ScsiResult
 import io.github.felixchang67.diskandroid.core.scsi.ScsiTransport
 import io.github.felixchang67.diskandroid.core.scsi.TransportErrorKind
+import io.github.felixchang67.diskandroid.core.testing.FakeDisc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmcTransport
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -18,6 +19,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -165,5 +167,69 @@ class DriveSessionTest {
         advanceTimeBy(3 * 1_501)
         runCurrent()
         assertIs<DriveState.Failed>(s.state.value)
+    }
+
+    @Test
+    fun cdExtraDiscInfoIsReadWhenReadyAndClearedOnEject() = runTest {
+        val fake = FakeMmc()
+        val s = session(FakeMmcTransport(fake))
+        s.start()
+        runCurrent()
+        fake.insertDisc(FakeDisc.cdExtra(), spinUpPolls = 1)
+        advanceTimeBy(1_501 + 2 * 501)
+        runCurrent()
+        val disc = assertNotNull(s.disc.value)
+        assertTrue(disc.errors.isEmpty(), disc.errors.toString())
+        assertEquals(3, disc.toc?.tracks?.size)
+        assertEquals(2, disc.audioTracks.size)
+        assertEquals(1, disc.dataTracks.size)
+        assertTrue(disc.hasAudio)
+        assertEquals(3, disc.tracks.size)
+        assertEquals(2, disc.discInformation?.sessions)
+        // 第 2 轨是第 1 区段最后一首：结尾取第 1 区段的 lead-out（完整 TOC 的 A2h），而不是第 3 轨起点
+        assertEquals(13_500L, disc.sectorsOf(disc.toc!!.tracks[1]))
+        assertTrue(s.events.value.any { it.message.contains("3 轨") }, s.events.value.toString())
+        // 阶段 1 只发读类命令
+        val opcodes = fake.received.map { it[0].toInt() and 0xFF }.toSet()
+        assertTrue(opcodes.all { it in io.github.felixchang67.diskandroid.core.scsi.ReadOnlyPolicy.allowed.keys }, opcodes.toString())
+
+        s.eject()
+        assertNull(s.disc.value)
+    }
+
+    @Test
+    fun dvdDiscInfoIncludesPhysicalCopyrightAndSpeed() = runTest {
+        val fake = FakeMmc().apply { insertDisc(FakeDisc.dvdVideo(regionMask = 0xFD, css = true), spinUpPolls = 0); pendingUnitAttention.clear(); pendingMediaEvents.clear() }
+        val s = session(FakeMmcTransport(fake))
+        s.start()
+        runCurrent()
+        val disc = assertNotNull(s.disc.value)
+        assertTrue(disc.errors.isEmpty(), disc.errors.toString())
+        assertEquals("DVD-ROM", disc.dvdPhysical?.bookTypeName())
+        assertEquals(true, disc.dvdCopyright?.isCss)
+        assertEquals(listOf(2), disc.dvdCopyright?.regions)
+        assertEquals(11_080L, disc.performance?.maxKBps)
+        assertEquals(2_295_104L * 2048, disc.capacity?.bytes)
+        assertTrue(disc.summary().contains("CSS 加密"), disc.summary())
+    }
+
+    @Test
+    fun oneTrayActionProducesOneEvent() = runTest {
+        val fake = FakeMmc().apply { insertDisc(0x0008, spinUpPolls = 0); pendingUnitAttention.clear(); pendingMediaEvents.clear() }
+        val s = session(FakeMmcTransport(fake))
+        s.start()
+        runCurrent()
+        val before = s.events.value.size
+        fake.openTray() // 用户按了光驱上的弹出键
+        advanceTimeBy(1_501)
+        runCurrent()
+        assertEquals(listOf("盘片已取出（托盘已打开）"), s.events.value.drop(before).map { it.message })
+
+        val before2 = s.events.value.size
+        fake.removeDiscFromOpenTray()
+        fake.closeTray()
+        advanceTimeBy(1_501)
+        runCurrent()
+        assertEquals(listOf("托盘已关闭"), s.events.value.drop(before2).map { it.message })
     }
 }

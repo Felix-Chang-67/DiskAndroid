@@ -145,3 +145,35 @@ class LoggingScsiTransportTest {
         assertTrue(messages.any { it.contains("省略了 4 次") }, messages.toString())
     }
 }
+
+class ReadOnlyPolicyDiscStructureTest {
+    private fun rds(format: Int, agid: Int = 0) = ScsiCommand.dataIn(
+        ByteArray(12).also { it[0] = 0xAD.toByte(); it[7] = format.toByte(); it[10] = (agid shl 6).toByte() }, 8, "rds",
+    )
+
+    @Test
+    fun physicalCopyrightAndBdInfoAreAllowed() {
+        for (f in listOf(0x00, 0x01, 0x03, 0x04, 0x0A, 0xFF)) {
+            kotlin.test.assertNull(ReadOnlyPolicy.check(rds(f)), "格式 ${Hex.byte(f)}h 应放行")
+        }
+    }
+
+    @Test
+    fun keyAndAuthenticationFormatsAreRefused() {
+        // DVD 盘钥 02h、CPRM 06h/07h、AACS 80h–8Fh
+        for (f in listOf(0x02, 0x06, 0x07, 0x80, 0x81, 0x83, 0x84, 0x86, 0x8F)) {
+            assertTrue(ReadOnlyPolicy.check(rds(f)) != null, "格式 ${Hex.byte(f)}h 必须被拒绝")
+        }
+        assertTrue(ReadOnlyPolicy.check(rds(0x00, agid = 1)) != null)
+    }
+
+    @Test
+    fun getPerformanceOnlyReadType() {
+        val read = ScsiCommand.dataIn(ByteArray(12).also { it[0] = 0xAC.toByte(); it[1] = 0x10 }, 24, "perf")
+        kotlin.test.assertNull(ReadOnlyPolicy.check(read))
+        val writeSpeeds = ScsiCommand.dataIn(ByteArray(12).also { it[0] = 0xAC.toByte(); it[10] = 0x03 }, 24, "perf")
+        assertTrue(ReadOnlyPolicy.check(writeSpeeds) != null)
+        val writePerf = ScsiCommand.dataIn(ByteArray(12).also { it[0] = 0xAC.toByte(); it[1] = 0x14 }, 24, "perf")
+        assertTrue(ReadOnlyPolicy.check(writePerf) != null)
+    }
+}

@@ -4,7 +4,7 @@
 > 技术栈：Kotlin + Jetpack Compose，minSdk 29，targetSdk 35，NDK
 > 开发全部在云端容器里完成（你暂时没有电脑可用）；每个可测节点我把 APK 直接发到对话里，你在平板上安装测试、把诊断信息贴回来。
 >
-> 进度：N1.1 已在真机通过；N1.2 已完成，等待真机测试（见第 7 节和 `docs/testing/N1.2.md`）。
+> 进度：N1.1、N1.2 已在真机通过；N1.3 已完成，等待真机测试（见第 7 节和 `docs/testing/N1.3.md`）。
 
 ---
 
@@ -562,7 +562,8 @@ N4.x + N1.5 → N5.1 / N5.2
 | 日期 | 节点 | 版本 | 内容 | 状态 |
 |---|---|---|---|---|
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
-| 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | 等待真机测试 |
+| 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
+| 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | 等待真机测试 |
 
 ### 7.3 N1.1 真机结果（2026-11-09）
 
@@ -574,3 +575,15 @@ N4.x + N1.5 → N5.1 / N5.2
 - 配置描述符声明"自供电、0 mA"——桥接芯片的写法，**不能据此判断耗电**，供电问题只能靠掉线/复位事件判断。
 - usbfs 能力含 NO_PACKET_SIZE_LIM 与 BULK_SCATTER_GATHER：大块 bulk 传输没有 16 KB 限制。
 - HyperOS 在后台划掉 App 会**强制停止**（SwipeUpClean）——读盘/刻录等长任务前要提示用户不要划掉，或在最近任务里锁定 App。
+
+### 7.4 N1.2 真机结果（2026-11-09，会话 session-20261109-235130）
+
+- **INQUIRY 只给出桥接芯片的身份**："BUFFALO / Optical Drive"，固件版本为空；真实机芯型号被隐藏。ADDITIONAL LENGTH = 5Bh（共 96 字节），N1.3 起读取完整 INQUIRY 看厂商自定义区。
+- 物理接口：**Serial ATAPI**（USB 桥后面是 SATA 光驱）；光驱序列号 MOAOCCI1742；固件日期 2021-06-21（原始 "212106211333"）。
+- 支持 18 种 profile：CD-ROM/R/RW、DVD-ROM/±R/±RW/RAM/±R DL、BD-ROM/R(SRM/RRM)/RE，以及 0002h "Removable disk"。42 个特性。
+- CD：CD-Text、C2 错误指针、CD-DA 精确流、R-W 子通道（不支持去交错纠错的 R-W）、ISRC/UPC；**缓存 4064 KB**；CD 最大读速 4234 kB/s（24x）。
+- **DVD CSS 版本 1；AACS 版本 1，2 个 AGID，支持总线加密、可读取光驱证书、绑定 nonce**（阶段 3 相关）。
+- **DVD 地区码：RPC-II，已设置为地区 2，用户还可修改 4 次，厂商重置 4 次**。CSS 加密且不含 2 区的 DVD 会被光驱拒绝读取加密扇区（6F/04），App 不会修改地区码。
+- GESN 正常（媒体事件 + 托盘状态）。就绪用时：CD 14.3 s，DVD 5.6 s，BD 7.8 s。
+- BOT：405 条命令，1 次 STALL，0 超时，0 复位。STALL 出现在 MODE SENSE（分配 256、实际 76 字节）：桥接芯片发完短数据后 STALL bulk-in，再发 CSW（residue 176）——这是 BOT 规范允许的"Hi > Di"处理方式，已按规范清 HALT 并重读 CSW。N1.3 起变长响应先读头再按确切长度读，避开这一步。
+- 问题（N1.3 已修）：一次开/关托盘记两条事件；Removable Medium 特性的 Lock 位被误显示为"已锁定"（实为"支持锁定"）。

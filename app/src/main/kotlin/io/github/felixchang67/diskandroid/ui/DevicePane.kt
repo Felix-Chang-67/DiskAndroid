@@ -45,12 +45,15 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.felixchang67.diskandroid.BuildConfig
 import io.github.felixchang67.diskandroid.MainViewModel
+import io.github.felixchang67.diskandroid.core.drive.DiscInfo
 import io.github.felixchang67.diskandroid.core.drive.DriveSession
 import io.github.felixchang67.diskandroid.core.drive.DriveState
 import io.github.felixchang67.diskandroid.core.drive.MediaStatus
 import io.github.felixchang67.diskandroid.core.log.Hex
 import io.github.felixchang67.diskandroid.core.log.LogFormat
 import io.github.felixchang67.diskandroid.core.mmc.MmcNames
+import io.github.felixchang67.diskandroid.core.mmc.ReadPerformance
+import io.github.felixchang67.diskandroid.core.mmc.RpcState
 import io.github.felixchang67.diskandroid.core.usb.MassStorageSelection
 import io.github.felixchang67.diskandroid.core.usb.ProbeReport
 import io.github.felixchang67.diskandroid.core.usb.UsbDeviceSnapshot
@@ -108,13 +111,13 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：光驱通信（BOT 传输 + 基础命令）", style = MaterialTheme.typography.titleMedium)
-            Text("1. 接上光驱后 App 会自动连接，读取光驱型号、支持的盘片、功能和 DVD 地区码。")
-            Text("2. 依次测试：不放盘 → 打开托盘 → 放入 CD / DVD / BD（等它显示“就绪”）→ 点“弹出光盘”或按光驱上的弹出键。")
-            Text("3. 每一步看“盘片”状态和“事件”是否对得上。")
-            Text("4. 最后点“复制诊断信息”，粘贴到对话里发给我。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：盘片信息（容量、TOC、轨道、盘片结构）", style = MaterialTheme.typography.titleMedium)
+            Text("1. 依次放入手头各种盘：音乐 CD、CD-ROM / CD-R、DVD（视频或数据）、DVD±R、BD。等显示“就绪”后会自动读取盘片信息。")
+            Text("2. 看“盘片信息”：类型、容量、状态、轨道列表（CD）、DVD 地区和是否加密、BD 类型、最高读速，和你知道的情况对一对。")
+            Text("3. 有加强版 CD（音轨 + 数据）或追加写过的 CD-R / DVD±R 更好，可以检查多区段。")
+            Text("4. 全部测完后点“导出日志（zip）”发给我（日志里有每张盘的完整信息），或者每张盘各点一次“复制诊断信息”。")
             Text(
-                "本版本只发送白名单里的只读命令，不会写盘，也不会修改地区码。",
+                "本版本只发送白名单里的只读命令，不读取盘片内容本身，不会写盘，也不会修改地区码。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -200,6 +203,7 @@ private fun DriveSection(session: DriveSession, onEject: () -> Unit, onRefresh: 
     val media by session.media.collectAsStateWithLifecycle()
     val info by session.info.collectAsStateWithLifecycle()
     val events by session.events.collectAsStateWithLifecycle()
+    val disc by session.disc.collectAsStateWithLifecycle()
 
     HorizontalDivider(Modifier.padding(vertical = 4.dp))
     val inquiry = info?.inquiry
@@ -224,6 +228,8 @@ private fun DriveSection(session: DriveSession, onEject: () -> Unit, onRefresh: 
     }
     info?.rpc?.let { KeyValue("DVD 地区码", it.summary()) }
 
+    disc?.let { d -> DiscSection(d, info?.rpc) }
+
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         FilledTonalButton(onClick = onEject, enabled = state is DriveState.Online) { Text("弹出光盘") }
         OutlinedButton(onClick = onRefresh, enabled = state is DriveState.Online) { Text("刷新信息") }
@@ -239,6 +245,52 @@ private fun DriveSection(session: DriveSession, onEject: () -> Unit, onRefresh: 
     info?.let { i ->
         Expandable("光驱详细信息", key = "info:${session.label}") { MonoBlock(i.describeLines().joinToString("\n")) }
         Expandable("原始响应（hex）", key = "raw:${session.label}") { MonoBlock(i.rawLines().joinToString("\n")) }
+    }
+}
+
+@Composable
+private fun DiscSection(disc: DiscInfo, driveRpc: RpcState?) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text("盘片信息", style = MaterialTheme.typography.titleSmall)
+        KeyValue("类型", MmcNames.profileName(disc.profile))
+        disc.capacity?.let { KeyValue("容量", "${DiscInfo.formatBytes(it.bytes)}（${it.blocks} 块 × ${it.blockLength} 字节）") }
+        disc.discInformation?.let {
+            KeyValue("状态", it.discStatusName() + "，${it.sessions} 个区段" + if (it.erasable) "，可擦写" else "")
+        }
+        disc.dvdPhysical?.let { KeyValue("DVD 物理格式", "${it.bookTypeName()}，${it.layers} 层，${it.discSizeName()}") }
+        disc.dvdCopyright?.let { c ->
+            KeyValue("DVD 版权", "${c.protectionName()}，${c.regionText()}")
+            val driveRegions = driveRpc?.regions.orEmpty()
+            if (c.isCss && driveRpc != null && driveRpc.rpcScheme == 1 && c.regions.size < 8 && c.regions.intersect(driveRegions.toSet()).isEmpty()) {
+                Text(
+                    "⚠ 盘片${c.regionText()}与光驱地区（${driveRegions.joinToString("、").ifEmpty { "未设置" }}）不符：" +
+                        "以后播放这张加密盘时光驱会拒绝读取加密扇区。App 不会修改光驱地区码。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = StatusColors.warn,
+                )
+            }
+        }
+        disc.bdInfo?.let { KeyValue("BD 类型", it.discTypeName()) }
+        disc.performance?.takeIf { it.maxKBps > 0 }?.let { p ->
+            KeyValue("最高读速", "${p.maxKBps} kB/s" + (ReadPerformance.speedFactor(p.maxKBps, disc.family)?.let { "（约 $it）" } ?: ""))
+        }
+        val tracks = disc.trackLines()
+        if (tracks.isNotEmpty()) {
+            Text("轨道（${tracks.size}）", style = MaterialTheme.typography.labelLarge)
+            MonoBlock(tracks.joinToString("\n"))
+        }
+        if (disc.errors.isNotEmpty()) {
+            StatusLine(null, "部分信息读取失败（不影响使用，详见诊断信息）：" + disc.errors.keys.joinToString("、"))
+        }
+        Expandable("盘片原始响应（hex）", key = "discraw:${disc.profile}:${disc.capacity?.lastLba}") {
+            MonoBlock(disc.rawLines().joinToString("\n"))
+        }
     }
 }
 

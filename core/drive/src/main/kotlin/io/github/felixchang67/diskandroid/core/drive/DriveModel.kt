@@ -75,11 +75,19 @@ class DriveInfo(
             out += "  当前 profile：${Hex.word(f.currentProfile)}h ${MmcNames.profileName(f.currentProfile)}" + if (f.truncated) "（特性列表被截断）" else ""
             f.physicalInterface?.let { out += "  物理接口：${MmcNames.physicalInterface(it)}" }
             out += "  支持的盘片：" + f.profiles.joinToString("、") { (p, cur) -> MmcNames.profileName(p) + if (cur) "（当前）" else "" }
-            f.loadingMechanism?.let { out += "  装载机构：${MmcNames.loadingMechanism(it)}，可弹出 ${yes(f.canEject)}，已锁定 ${yes(f.locked)}" }
+            f.loadingMechanism?.let {
+                out += "  装载机构：${MmcNames.loadingMechanism(it)}，可弹出 ${yes(f.canEject)}，支持锁定盘片 ${yes(f.canLock)}" +
+                    (capabilities?.let { c -> "，当前已锁定 ${yes(c.lockState)}" } ?: "")
+            }
             if (f.feature(0x001E) != null) out += "  CD 读取：CD-Text ${yes(f.cdReadCdText)}，C2 错误指针 ${yes(f.cdReadC2)}，DAP ${yes(f.cdReadDap)}"
             out += "  DVD 读取：${yes(f.feature(0x001F) != null)}；BD 读取：${yes(f.feature(0x0040) != null)}；实时流：${f.realTimeStreaming ?: "否"}"
             out += "  DVD CSS：" + (f.cssVersion?.let { "支持（版本 $it）" } ?: "不支持")
-            out += "  AACS：" + (f.aacs?.let { "支持（版本 ${it.version}，AGID ${it.agidCount} 个，绑定 nonce ${yes(it.bindingNonceGeneration)}）" } ?: "不支持")
+            out += "  AACS：" + (
+                f.aacs?.let {
+                    "支持（版本 ${it.version}，AGID ${it.agidCount} 个，总线加密 ${yes(it.busEncryption)}，" +
+                        "可读光驱证书 ${yes(it.readDriveCertificate)}，绑定 nonce ${yes(it.bindingNonceGeneration)}）"
+                } ?: "不支持"
+                )
             val writes = listOf(0x002D to "CD TAO", 0x002E to "CD SAO", 0x002F to "DVD-R/RW", 0x002B to "DVD+R", 0x002A to "DVD+RW", 0x003B to "DVD+R DL", 0x0041 to "BD-R/RE")
                 .filter { (code, _) -> f.feature(code) != null }.map { it.second }
             out += "  刻录能力（仅信息，阶段 1 不会使用）：" + writes.ifEmpty { listOf("无") }.joinToString("、")

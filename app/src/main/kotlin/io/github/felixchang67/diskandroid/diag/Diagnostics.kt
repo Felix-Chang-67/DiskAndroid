@@ -42,6 +42,12 @@ object Diagnostics {
                     line("  原始响应：")
                     info.rawLines().forEach { line("  $it") }
                 }
+                s.disc.value?.let { disc ->
+                    line("  ----- 当前盘片 -----")
+                    disc.describeLines().forEach { line("  $it") }
+                    line("  盘片原始响应：")
+                    disc.rawLines().forEach { line("  $it") }
+                }
                 line("  事件：")
                 s.events.value.forEach { line("    $it") }
             }

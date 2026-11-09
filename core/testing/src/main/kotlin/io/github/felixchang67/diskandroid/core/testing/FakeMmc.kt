@@ -27,28 +27,37 @@ class FakeMmc {
     // ---- 动态状态 ----
     var trayOpen = false
     /** 托盘里的盘（不管托盘开没开），null 表示没有盘。 */
-    var discProfile: Int? = null
+    var disc: FakeDisc? = null
+
+    /** 只换 profile 时用默认盘片模型。 */
+    var discProfile: Int?
+        get() = disc?.profile
+        set(value) {
+            disc = value?.let { FakeDisc.forProfile(it) }
+        }
     var becomingReadyPolls = 0
     val pendingUnitAttention = ArrayDeque<Pair<Int, Int>>()
     val pendingMediaEvents = ArrayDeque<Int>()
     val received = mutableListOf<ByteArray>()
     private var sense: ByteArray? = null
 
-    val mediumPresent: Boolean get() = !trayOpen && discProfile != null
+    val mediumPresent: Boolean get() = !trayOpen && disc != null
 
     fun powerOn() {
         pendingUnitAttention.addLast(0x29 to 0x00)
     }
 
     /** 用户把盘放进托盘并推回去。 */
-    fun insertDisc(profile: Int, spinUpPolls: Int = 2) {
-        discProfile = profile
+    fun insertDisc(profile: Int, spinUpPolls: Int = 2) = insertDisc(FakeDisc.forProfile(profile), spinUpPolls)
+
+    fun insertDisc(disc: FakeDisc, spinUpPolls: Int = 2) {
+        this.disc = disc
         closeTray(spinUpPolls)
     }
 
     fun closeTray(spinUpPolls: Int = 2) {
         trayOpen = false
-        if (discProfile != null) {
+        if (disc != null) {
             becomingReadyPolls = spinUpPolls
             pendingUnitAttention.addLast(0x28 to 0x00)
             pendingMediaEvents.addLast(2) // NewMedia
@@ -65,7 +74,7 @@ class FakeMmc {
     }
 
     fun removeDiscFromOpenTray() {
-        discProfile = null
+        disc = null
     }
 
     fun handle(cdb: ByteArray, dataOut: ByteArray? = null): Reply {
@@ -87,12 +96,167 @@ class FakeMmc {
             0x5A -> if ((cdb[2].toInt() and 0x3F) == 0x2A) good(modeSense2A(), allocation10(cdb)) else check(0x5, 0x24, 0x00)
             0xA4 -> if ((cdb[10].toInt() and 0x3F) == 0x08) good(rpcState, allocation12(cdb)) else check(0x5, 0x24, 0x00)
             0xBD -> good(mechanismStatus(), allocation12(cdb))
+            0x25, 0x51, 0x52, 0x43, 0xAD, 0xAC -> notReady() ?: mediaCommand(op, cdb)
             else -> check(0x5, 0x20, 0x00)
         }
     }
 
+    /** 盘片未就绪时（无盘 / 正在就绪）返回对应的 CHECK CONDITION；不消耗就绪计数（只有 TUR 消耗）。 */
+    private fun notReady(): Reply? = when {
+        disc == null || trayOpen -> check(0x2, 0x3A, if (trayOpen) 0x02 else 0x01)
+        becomingReadyPolls > 0 -> check(0x2, 0x04, 0x01)
+        else -> null
+    }
+
+    private fun mediaCommand(op: Int, cdb: ByteArray): Reply {
+        val d = disc!!
+        return when (op) {
+            0x25 -> good(be32(d.leadOutLba - 1) + be32(d.blockLength.toLong()), 8)
+            0x51 -> good(discInformation(d), allocation10(cdb))
+            0x52 -> trackInformation(d, cdb)
+            0x43 -> toc(d, cdb)
+            0xAD -> discStructure(d, cdb)
+            else -> performance(d, cdb)
+        }
+    }
+
+    private fun isCd(d: FakeDisc) = d.profile in 0x0008..0x000A
+    private fun isDvd(d: FakeDisc) = d.profile in 0x0010..0x002B
+    private fun isBd(d: FakeDisc) = d.profile in 0x0040..0x0043
+
+    private fun discInformation(d: FakeDisc): ByteArray {
+        val b = ByteArray(34)
+        b[1] = 32
+        val state = if (d.finalized) 0x0E else 0x05 // 已完成区段 + 已封盘 / 未完成区段 + 可追加
+        b[2] = ((if (d.erasable) 0x10 else 0) or state).toByte()
+        b[3] = 1
+        val lastSession = d.sessions.last()
+        val inLast = d.tracks.filter { it.session == lastSession }
+        b[4] = d.sessions.size.toByte()
+        b[5] = inLast.first().number.toByte()
+        b[6] = inLast.last().number.toByte()
+        b[7] = 0x20
+        b[8] = if (isCd(d)) 0x00 else 0xFF.toByte()
+        for (i in 16..23) b[i] = 0xFF.toByte()
+        return b
+    }
+
+    private fun trackInformation(d: FakeDisc, cdb: ByteArray): Reply {
+        val type = cdb[1].toInt() and 0x03
+        val value = ((cdb[2].toLong() and 0xFF) shl 24) or ((cdb[3].toLong() and 0xFF) shl 16) or ((cdb[4].toLong() and 0xFF) shl 8) or (cdb[5].toLong() and 0xFF)
+        val t = when (type) {
+            0 -> d.tracks.firstOrNull { value >= it.startLba && value < it.startLba + it.sectors }
+            1 -> d.tracks.firstOrNull { it.number.toLong() == value }
+            else -> d.tracks.firstOrNull { it.session.toLong() == value }
+        } ?: return check(0x5, 0x24, 0x00)
+        val b = ByteArray(48)
+        b[1] = 46
+        b[2] = t.number.toByte()
+        b[3] = t.session.toByte()
+        b[5] = if (t.audio) 0x00 else 0x04
+        b[6] = if (t.audio) 0x0F else 0x01
+        be32(t.startLba).copyInto(b, 8)
+        be32(t.sectors).copyInto(b, 24)
+        be32(t.startLba + t.sectors - 1).copyInto(b, 28)
+        return good(b, allocation10(cdb))
+    }
+
+    private fun toc(d: FakeDisc, cdb: ByteArray): Reply {
+        val msf = (cdb[1].toInt() and 0x02) != 0
+        val format = cdb[2].toInt() and 0x0F
+        val body = when (format) {
+            0 -> {
+                val start = maxOf(1, cdb[6].toInt() and 0xFF)
+                val entries = d.tracks.filter { it.number >= start }.map { tocEntry(it.number, if (it.audio) 0x10 else 0x14, it.startLba, msf) } +
+                    tocEntry(0xAA, 0x14, d.leadOutLba, msf)
+                byteArrayOf(d.tracks.first().number.toByte(), d.tracks.last().number.toByte()) + entries.fold(ByteArray(0)) { a, e -> a + e }
+            }
+            1 -> {
+                val last = d.sessions.last()
+                val first = d.tracks.first { it.session == last }
+                byteArrayOf(1, last.toByte(), 0, 0x14, first.number.toByte(), 0) + be32(first.startLba)
+            }
+            2 -> {
+                if (!isCd(d)) return check(0x5, 0x24, 0x00)
+                val entries = mutableListOf<ByteArray>()
+                for (s in d.sessions) {
+                    val ts = d.tracks.filter { it.session == s }
+                    val ctrl = if (ts.first().audio) 0x10 else 0x14
+                    val end = if (s == d.sessions.last()) d.leadOutLba else ts.last().startLba + ts.last().sectors
+                    entries += fullTocEntry(s, ctrl, 0xA0, ts.first().number, 0x00, 0)
+                    entries += fullTocEntry(s, ctrl, 0xA1, ts.last().number, 0, 0)
+                    entries += msfEntry(s, ctrl, 0xA2, end)
+                    ts.forEach { t -> entries += msfEntry(s, if (t.audio) 0x10 else 0x14, t.number, t.startLba) }
+                }
+                byteArrayOf(d.sessions.first().toByte(), d.sessions.last().toByte()) + entries.fold(ByteArray(0)) { a, e -> a + e }
+            }
+            else -> return check(0x5, 0x24, 0x00)
+        }
+        val len = body.size
+        return good(byteArrayOf((len shr 8).toByte(), len.toByte()) + body, allocation10(cdb))
+    }
+
+    private fun tocEntry(track: Int, adrCtrl: Int, lba: Long, msf: Boolean): ByteArray {
+        val addr = if (msf) byteArrayOf(0) + msfBytes(lba) else be32(lba)
+        return byteArrayOf(0, adrCtrl.toByte(), track.toByte(), 0) + addr
+    }
+
+    private fun msfBytes(lba: Long): ByteArray {
+        val a = lba + 150
+        return byteArrayOf((a / 4500).toByte(), ((a / 75) % 60).toByte(), (a % 75).toByte())
+    }
+
+    private fun fullTocEntry(session: Int, adrCtrl: Int, point: Int, pmin: Int, psec: Int, pframe: Int) =
+        byteArrayOf(session.toByte(), adrCtrl.toByte(), 0, point.toByte(), 0, 0, 0, 0, pmin.toByte(), psec.toByte(), pframe.toByte())
+
+    private fun msfEntry(session: Int, adrCtrl: Int, point: Int, lba: Long): ByteArray {
+        val m = msfBytes(lba)
+        return fullTocEntry(session, adrCtrl, point, m[0].toInt(), m[1].toInt(), m[2].toInt())
+    }
+
+    private fun discStructure(d: FakeDisc, cdb: ByteArray): Reply {
+        val mediaType = cdb[1].toInt() and 0x0F
+        val format = cdb[7].toInt() and 0xFF
+        val alloc = allocation12(cdb)
+        return when {
+            mediaType == 0 && isDvd(d) && format == 0x00 -> {
+                val b = ByteArray(2052)
+                b[0] = 0x08
+                b[1] = 0x02
+                b[4] = 0x01 // DVD-ROM，Part 1
+                b[5] = 0x02 // 120 mm，10.08 Mbit/s
+                b[6] = (((d.dvdLayers - 1) shl 5) or 0x01).toByte()
+                b[7] = 0x10
+                be32(0x030000).copyInto(b, 8)
+                be32(0x030000 + d.leadOutLba - 1).copyInto(b, 12)
+                good(b, alloc)
+            }
+            mediaType == 0 && isDvd(d) && format == 0x01 ->
+                good(byteArrayOf(0x00, 0x06, 0, 0, d.dvdProtection.toByte(), d.dvdRegionMask.toByte(), 0, 0), alloc)
+            mediaType == 1 && isBd(d) && format == 0x00 -> {
+                val b = ByteArray(4 + 64)
+                b[1] = 66
+                byteArrayOf('D'.code.toByte(), 'I'.code.toByte(), 0x01, 0x08).copyInto(b, 4)
+                d.bdTypeId.toByteArray(Charsets.US_ASCII).copyInto(b, 12)
+                b[15] = 0x11
+                good(b, alloc)
+            }
+            else -> check(0x5, 0x30, 0x02)
+        }
+    }
+
+    private fun performance(d: FakeDisc, cdb: ByteArray): Reply {
+        if ((cdb[10].toInt() and 0xFF) != 0) return check(0x5, 0x24, 0x00)
+        val desc = be32(0) + be32(d.readSpeedKBps / 2L) + be32(d.leadOutLba - 1) + be32(d.readSpeedKBps.toLong())
+        // GET PERFORMANCE 的字节 8–9 是"最多返回几个描述符"，传输长度 = 8 + 16 × N
+        val maxDescriptors = allocation12(cdb)
+        return good(be32(4L + desc.size) + byteArrayOf(0, 0, 0, 0) + desc, 8 + 16 * maxDescriptors)
+    }
+
+    private fun be32(v: Long) = byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte())
+
     private fun testUnitReady(): Reply = when {
-        discProfile == null || trayOpen -> check(0x2, 0x3A, if (trayOpen) 0x02 else 0x01)
+        disc == null || trayOpen -> check(0x2, 0x3A, if (trayOpen) 0x02 else 0x01)
         becomingReadyPolls > 0 -> {
             becomingReadyPolls--
             check(0x2, 0x04, 0x01)

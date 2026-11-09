@@ -32,8 +32,8 @@ object ReadOnlyPolicy : CommandPolicy {
         0x5A to "MODE SENSE(10)",
         0xA4 to "REPORT KEY（仅 RPC 状态）",
         0xA8 to "READ(12)",
-        0xAC to "GET PERFORMANCE",
-        0xAD to "READ DISC STRUCTURE",
+        0xAC to "GET PERFORMANCE（仅读取速度）",
+        0xAD to "READ DISC STRUCTURE（不含密钥类格式）",
         0xBB to "SET CD SPEED",
         0xBD to "MECHANISM STATUS",
         0xBE to "READ CD",
@@ -52,6 +52,22 @@ object ReadOnlyPolicy : CommandPolicy {
                 val keyClass = if (cdb.size > 7) cdb[7].toInt() and 0xFF else -1
                 val keyFormat = if (cdb.size > 10) cdb[10].toInt() and 0x3F else -1
                 if (keyClass == 0x00 && keyFormat == 0x08) null else "REPORT KEY 只允许读取 RPC 状态（KEY FORMAT 08h）"
+            }
+            // READ DISC STRUCTURE：不允许密钥 / 认证相关的格式（DVD 盘钥 02h、CPRM 06h/07h、AACS 80h–8Fh），AGID 必须为 0
+            0xAD -> {
+                val format = if (cdb.size > 7) cdb[7].toInt() and 0xFF else -1
+                val agid = if (cdb.size > 10) (cdb[10].toInt() shr 6) and 0x03 else 0
+                when {
+                    format == 0x02 || format == 0x06 || format == 0x07 || format in 0x80..0x8F ->
+                        "READ DISC STRUCTURE 格式 ${Hex.byte(format)}h 与密钥/认证有关，阶段 1 不允许"
+                    agid != 0 -> "READ DISC STRUCTURE 不允许指定 AGID"
+                    else -> null
+                }
+            }
+            // GET PERFORMANCE：只允许 Type 00h（读取性能）
+            0xAC -> {
+                val type = if (cdb.size > 10) cdb[10].toInt() and 0xFF else -1
+                if (type == 0x00 && (cdb[1].toInt() and 0x04) == 0) null else "GET PERFORMANCE 只允许读取性能（Type 00h，Write=0）"
             }
             else -> null
         }

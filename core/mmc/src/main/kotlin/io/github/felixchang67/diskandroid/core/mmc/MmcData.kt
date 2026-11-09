@@ -83,10 +83,12 @@ class FeatureList(
     /** Core（0001h）：物理接口标准。 */
     val physicalInterface: Long? get() = feature(0x0001)?.takeIf { it.data.size >= 4 }?.bytes?.be32(0)
 
-    /** Removable Medium（0003h）：装载机构、可弹出、锁定。 */
+    /** Removable Medium（0003h）：装载机构、可弹出、可锁定。 */
     val loadingMechanism: Int? get() = feature(0x0003)?.takeIf { it.data.isNotEmpty() }?.let { it.bytes.u8(0) shr 5 }
     val canEject: Boolean? get() = feature(0x0003)?.takeIf { it.data.isNotEmpty() }?.bytes?.bit(0, 3)
-    val locked: Boolean? get() = feature(0x0003)?.takeIf { it.data.isNotEmpty() }?.bytes?.bit(0, 0)
+
+    /** Lock 位表示"PREVENT ALLOW MEDIUM REMOVAL 能锁住盘片"（是能力，不是当前状态；当前状态看 2Ah 页的 Lock State）。 */
+    val canLock: Boolean? get() = feature(0x0003)?.takeIf { it.data.isNotEmpty() }?.bytes?.bit(0, 0)
 
     /** CD Read（001Eh）：DAP、C2 错误指针、CD-Text。 */
     val cdReadDap: Boolean? get() = feature(0x001E)?.takeIf { it.data.isNotEmpty() }?.bytes?.bit(0, 7)
@@ -96,11 +98,23 @@ class FeatureList(
     /** DVD CSS（0106h）：CSS 版本。 */
     val cssVersion: Int? get() = feature(0x0106)?.takeIf { it.data.size >= 4 }?.bytes?.u8(3)
 
-    /** AACS（010Dh）：BNG、绑定 nonce 块数、AGID 数、AACS 版本。 */
+    /**
+     * AACS（010Dh）。位定义与 libaacs（mmc.c _mmc_check_aacs）一致：
+     * 字节 4 bit 0 = 绑定 nonce 生成，bit 1 = 总线加密，bit 4 = 可读取光驱证书；字节 5 = 绑定 nonce 块数；
+     * 字节 6 低 4 位 = AGID 数；字节 7 = AACS 版本。
+     */
     val aacs: AacsFeature?
         get() = feature(0x010D)?.takeIf { it.data.size >= 4 }?.let {
             val b = it.bytes
-            AacsFeature(b.bit(0, 0), b.u8(1), b.u8(2) and 0x0F, b.u8(3), it.current)
+            AacsFeature(
+                bindingNonceGeneration = b.bit(0, 0),
+                busEncryption = b.bit(0, 1),
+                readDriveCertificate = b.bit(0, 4),
+                bindingNonceBlockCount = b.u8(1),
+                agidCount = b.u8(2) and 0x0F,
+                version = b.u8(3),
+                current = it.current,
+            )
         }
 
     /** Real Time Streaming（0107h）的标志位文本。 */
@@ -114,14 +128,20 @@ class FeatureList(
     /** Drive Serial Number（0108h）。 */
     val driveSerialNumber: String? get() = feature(0x0108)?.let { Bytes(it.data).ascii(0, it.data.size).trim() }
 
-    /** Firmware Information（010Ch）：14 个 ASCII 数字 世纪年月日时分秒。 */
+    /**
+     * Firmware Information（010Ch）：ASCII 的 世纪(2) 年(2) 月(2) 日(2) 时(2) 分(2) 秒(2)。
+     * 有的光驱秒位填空格，世纪字段填 "21"（表示 21 世纪），这里都按 20xx 年显示，并附原始值。
+     */
     val firmwareDate: String?
-        get() = feature(0x010C)?.takeIf { it.data.size >= 14 }?.let {
-            val s = Bytes(it.data).ascii(0, 14)
-            if (s.length == 14 && s.all { c -> c.isDigit() }) {
-                "${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)} ${s.substring(8, 10)}:${s.substring(10, 12)}:${s.substring(12, 14)}"
+        get() = feature(0x010C)?.takeIf { it.data.size >= 12 }?.let {
+            val rawText = Bytes(it.data).ascii(0, minOf(14, it.data.size)).trim()
+            val digits = rawText.takeWhile { c -> c.isDigit() }
+            if (digits.length >= 12) {
+                val year = if (digits.substring(0, 2) == "19") "19" + digits.substring(2, 4) else "20" + digits.substring(2, 4)
+                val time = "${digits.substring(8, 10)}:${digits.substring(10, 12)}" + if (digits.length >= 14) ":${digits.substring(12, 14)}" else ""
+                "$year-${digits.substring(4, 6)}-${digits.substring(6, 8)} $time（原始 $rawText）"
             } else {
-                s
+                rawText
             }
         }
 
@@ -153,6 +173,8 @@ class FeatureList(
 
 class AacsFeature(
     val bindingNonceGeneration: Boolean,
+    val busEncryption: Boolean,
+    val readDriveCertificate: Boolean,
     val bindingNonceBlockCount: Int,
     val agidCount: Int,
     val version: Int,

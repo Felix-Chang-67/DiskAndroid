@@ -71,6 +71,10 @@ class DriveSession(
     private val _events = MutableStateFlow<List<DriveEvent>>(emptyList())
     val events: StateFlow<List<DriveEvent>> = _events.asStateFlow()
 
+    /** 当前盘片的信息（盘片就绪时读取；无盘时为 null）。 */
+    private val _disc = MutableStateFlow<DiscInfo?>(null)
+    val disc: StateFlow<DiscInfo?> = _disc.asStateFlow()
+
     /** 新事件的流（给界面弹提示用；不重放历史）。 */
     private val _eventFlow = MutableSharedFlow<DriveEvent>(extraBufferCapacity = 64)
     val eventFlow: SharedFlow<DriveEvent> = _eventFlow.asSharedFlow()
@@ -82,6 +86,10 @@ class DriveSession(
     private var transportErrors = 0
     /** 收到 UNIT ATTENTION 28h/29h 后置位：下一次 TUR 成功时必须重新读取 profile（可能在两次轮询之间换了盘）。 */
     private var mediaMayHaveChanged = false
+
+    /** 同一次轮询里 GESN 报告的托盘变化；如果盘片状态机已经产生了事件，就不再重复记录（N1.2 真机上出现过重复事件）。 */
+    private var pendingTrayEvent: String? = null
+    private var stateEventThisPoll = false
 
     val description: String get() = transport.description
 
@@ -118,7 +126,10 @@ class DriveSession(
     }
 
     /** 重新读取光驱信息（INQUIRY / GET CONFIGURATION / 2Ah / RPC / 机构 / GESN）。 */
-    suspend fun refreshInfo() = runCommand { readInfo() }
+    suspend fun refreshInfo() = runCommand {
+        readInfo()
+        (_media.value as? MediaStatus.Ready)?.let { _disc.value = readDisc(it.profile) }
+    }
 
     /** 弹出托盘（START STOP UNIT，LoEj=1 Start=0）。返回给用户看的结果。 */
     suspend fun eject(): String = runCommand {
@@ -189,6 +200,20 @@ class DriveSession(
             }
         }
 
+        // 完整 INQUIRY：设备声明的数据比 36 字节长时，再读一次拿到厂商自定义区（桥接芯片有时把真实机芯信息放在这里）
+        inquiry?.let { inq ->
+            val declared = inq.additionalLength + 5
+            if (declared > 36) {
+                val (rf, df) = execIn(MmcCommands.inquiryFull(minOf(declared, 96)))
+                if (df != null) {
+                    raw["INQUIRY（完整）"] = df
+                    InquiryData.parse(df)?.let { inquiry = it }
+                } else {
+                    errors["INQUIRY（完整）"] = rf.toString()
+                }
+            }
+        }
+
         // GET CONFIGURATION：先读 8 字节头拿到总长度，再读全部（个别桥接芯片对大分配长度处理不好，分两次更稳）
         var features: FeatureList? = null
         val (h, hd) = execIn(MmcCommands.getConfiguration(0, 0, 8))
@@ -206,8 +231,16 @@ class DriveSession(
             errors["GET CONFIGURATION"] = h.toString()
         }
 
+        // MODE SENSE 2Ah：同样先读 8 字节头，再按 MODE DATA LENGTH + 2 读确切长度。
+        // N1.2 真机上用 256 字节分配长度时，桥接芯片发完 76 字节后 STALL 了一次（BOT 允许，但能避开就避开）。
         var capabilities: CapabilitiesPage? = null
-        val (mr, md) = execIn(MmcCommands.modeSense10(0x2A))
+        val (mh, mhd) = execIn(MmcCommands.modeSense10(0x2A, 8))
+        val modeTotal = if (mhd != null && mhd.size >= 2) ((((mhd[0].toInt() and 0xFF) shl 8) or (mhd[1].toInt() and 0xFF)) + 2).coerceIn(8, 1024) else 0
+        val (mr, md) = when {
+            mhd == null -> mh to null
+            modeTotal <= mhd.size -> mh to mhd
+            else -> execIn(MmcCommands.modeSense10(0x2A, modeTotal))
+        }
         if (md != null) {
             raw["MODE SENSE 2Ah"] = md
             capabilities = CapabilitiesPage.parse(md)
@@ -264,28 +297,29 @@ class DriveSession(
     }
 
     private fun pollOnce() {
+        pendingTrayEvent = null
+        stateEventThisPoll = false
         if (gesnSupported) {
             val (_, d) = execIn(MmcCommands.getEventStatus(quiet = true))
             d?.let { EventStatus.parse(it) }?.let { handleEvent(it) }
         }
         applyTur(testUnitReady(quiet = true), initial = false)
+        if (!stateEventThisPoll) pendingTrayEvent?.let { addEvent(DriveEvent.Kind.TRAY, it) }
+        pendingTrayEvent = null
     }
 
     private fun handleEvent(ev: EventStatus) {
         val code = ev.mediaEventCode ?: return
         ev.trayOpen?.let { open ->
             if (lastGesnTray != null && lastGesnTray != open) {
-                addEvent(DriveEvent.Kind.TRAY, if (open) "托盘已打开" else "托盘已关闭")
+                pendingTrayEvent = if (open) "托盘已打开" else "托盘已关闭"
             }
             lastGesnTray = open
         }
         if (code == 0) return
-        val text = "媒体事件：${MmcNames.mediaEvent(code)}"
-        log.i(TAG, text, "盘片在位" to ev.mediaPresent, "托盘打开" to ev.trayOpen)
-        when (code) {
-            1 -> addEvent(DriveEvent.Kind.EJECT_REQUEST, "检测到弹出请求（按了光驱上的弹出键）")
-            else -> addEvent(DriveEvent.Kind.INFO, text)
-        }
+        // 新盘片 / 取出 / 更换由盘片状态机记录事件，这里只写日志；弹出请求单独记事件
+        log.i(TAG, "媒体事件：${MmcNames.mediaEvent(code)}", "盘片在位" to ev.mediaPresent, "托盘打开" to ev.trayOpen)
+        if (code == 1) addEvent(DriveEvent.Kind.EJECT_REQUEST, "检测到弹出请求（按了光驱上的弹出键）")
     }
 
     private fun testUnitReady(quiet: Boolean): ScsiResult = exec(MmcCommands.testUnitReady(quiet))
@@ -323,7 +357,9 @@ class DriveSession(
                 val ready = MediaStatus.Ready(currentProfile())
                 if (changed && ready == previous) {
                     log.i(TAG, "盘片已更换（类型相同）：${ready.label()}")
+                    stateEventThisPoll = true
                     addEvent(DriveEvent.Kind.MEDIA_INSERTED, "盘片已更换：${MmcNames.profileName(ready.profile)}")
+                    _disc.value = readDisc(ready.profile)
                 }
                 ready
             }
@@ -351,14 +387,26 @@ class DriveSession(
         _media.value = next
         val level = if (next is MediaStatus.NotReady) LogLevel.WARN else LogLevel.INFO
         log.log(level, TAG, "盘片状态：${previous.label()} → ${next.label()}")
+        if (next is MediaStatus.Ready) {
+            _disc.value = readDisc(next.profile)
+        } else {
+            _disc.value = null
+        }
+        stateEventThisPoll = true
         when {
-            next is MediaStatus.Ready -> addEvent(DriveEvent.Kind.MEDIA_INSERTED, "盘片就绪：${MmcNames.profileName(next.profile)}" + becomingReadyDuration(previous))
+            next is MediaStatus.Ready -> addEvent(
+                DriveEvent.Kind.MEDIA_INSERTED,
+                "盘片就绪：${_disc.value?.summary() ?: MmcNames.profileName(next.profile)}" + becomingReadyDuration(previous),
+            )
             next is MediaStatus.NoMedium && previous is MediaStatus.Ready -> addEvent(DriveEvent.Kind.MEDIA_REMOVED, "盘片已取出（${next.tray.label}）")
             next is MediaStatus.NoMedium && previous is MediaStatus.NoMedium && next.tray != previous.tray -> addEvent(DriveEvent.Kind.TRAY, next.tray.label)
             next is MediaStatus.BecomingReady -> addEvent(DriveEvent.Kind.INFO, "检测到盘片，正在读取…")
             next is MediaStatus.NotReady -> addEvent(DriveEvent.Kind.ERROR, next.label())
         }
     }
+
+    /** 读取盘片信息（容量、TOC、轨道、盘片结构、读取速度）。 */
+    private fun readDisc(profile: Int): DiscInfo = DiscReader(::execIn, log, wallClock).read(profile)
 
     private fun becomingReadyDuration(previous: MediaStatus): String =
         if (previous is MediaStatus.BecomingReady) "（用时 ${(wallClock() - previous.sinceMs) / 100 / 10.0} 秒）" else ""
@@ -409,6 +457,7 @@ class DriveSession(
         if (_state.value is DriveState.Disconnected || _state.value is DriveState.Closed) return
         _state.value = DriveState.Disconnected
         _media.value = MediaStatus.Unknown
+        _disc.value = null
         addEvent(DriveEvent.Kind.ERROR, "光驱已断开：$reason")
         log.w(TAG, "光驱已断开", "光驱" to label, "原因" to reason)
     }

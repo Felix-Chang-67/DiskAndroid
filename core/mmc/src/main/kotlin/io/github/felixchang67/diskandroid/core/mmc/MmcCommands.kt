@@ -101,4 +101,101 @@ object MmcCommands {
         }
         return ScsiCommand.noData(cdb, name, timeoutMs = 30_000)
     }
+
+    /** INQUIRY 扩展：读取厂商自定义区（字节 36 起）。分配长度取设备声明的 ADDITIONAL LENGTH + 5，最多 96。 */
+    fun inquiryFull(allocation: Int): ScsiCommand {
+        require(allocation in 36..255)
+        return ScsiCommand.dataIn(byteArrayOf(0x12, 0, 0, 0, allocation.toByte(), 0), allocation, "INQUIRY（完整）", timeoutMs = 5_000)
+    }
+
+    /** READ CAPACITY(10)（25h）：最后一个 LBA + 块长度，共 8 字节。 */
+    fun readCapacity() = ScsiCommand.dataIn(ByteArray(10).also { it[0] = 0x25 }, 8, "READ CAPACITY", timeoutMs = 10_000)
+
+    /** READ DISC INFORMATION（51h），Data Type 000b（标准盘片信息）。 */
+    fun readDiscInformation(allocation: Int): ScsiCommand {
+        val cdb = ByteArray(10)
+        cdb[0] = 0x51
+        cdb[7] = (allocation shr 8).toByte()
+        cdb[8] = allocation.toByte()
+        return ScsiCommand.dataIn(cdb, allocation, "READ DISC INFORMATION", timeoutMs = 10_000)
+    }
+
+    /**
+     * READ TRACK INFORMATION（52h）。
+     * @param addressType 0 = LBA，1 = 轨道号，2 = 区段号。
+     */
+    fun readTrackInformation(addressType: Int, value: Long, allocation: Int): ScsiCommand {
+        require(addressType in 0..2)
+        val cdb = ByteArray(10)
+        cdb[0] = 0x52
+        cdb[1] = addressType.toByte()
+        putBe32(cdb, 2, value)
+        cdb[7] = (allocation shr 8).toByte()
+        cdb[8] = allocation.toByte()
+        return ScsiCommand.dataIn(cdb, allocation, "READ TRACK INFORMATION", timeoutMs = 10_000)
+    }
+
+    /**
+     * READ TOC/PMA/ATIP（43h）。与 Linux sr_read_tocentry / libburn 一致：字节 1 的 bit 1 = MSF，字节 2 = 格式，
+     * 字节 6 = 轨道/区段号，字节 7–8 = 分配长度，字节 9（Control）恒为 0。
+     * @param format 0 = TOC，1 = 区段信息，2 = 完整 TOC，5 = CD-TEXT。
+     */
+    fun readToc(format: Int, msf: Boolean, trackOrSession: Int, allocation: Int): ScsiCommand {
+        require(format in 0..5 && trackOrSession in 0..0xFF)
+        val cdb = ByteArray(10)
+        cdb[0] = 0x43
+        cdb[1] = if (msf) 0x02 else 0
+        cdb[2] = format.toByte()
+        cdb[6] = trackOrSession.toByte()
+        cdb[7] = (allocation shr 8).toByte()
+        cdb[8] = allocation.toByte()
+        val name = when (format) {
+            0 -> "READ TOC（格式 0 TOC）"
+            1 -> "READ TOC（格式 1 区段信息）"
+            2 -> "READ TOC（格式 2 完整 TOC）"
+            5 -> "READ TOC（格式 5 CD-TEXT）"
+            else -> "READ TOC（格式 $format）"
+        }
+        return ScsiCommand.dataIn(cdb, allocation, name, timeoutMs = 10_000)
+    }
+
+    /**
+     * READ DISC STRUCTURE（ADh）。与 Linux dvd_read_physical / dvd_read_copyright 一致：
+     * 字节 1 = 介质类型（0 = DVD/HD DVD，1 = BD），字节 2–5 = 地址，字节 6 = 层号，字节 7 = 格式，字节 8–9 = 分配长度。
+     * 阶段 1 不读取密钥类格式（只读守卫会拦截）。
+     */
+    fun readDiscStructure(mediaType: Int, format: Int, allocation: Int, layer: Int = 0, address: Long = 0): ScsiCommand {
+        val cdb = ByteArray(12)
+        cdb[0] = 0xAD.toByte()
+        cdb[1] = (mediaType and 0x0F).toByte()
+        putBe32(cdb, 2, address)
+        cdb[6] = layer.toByte()
+        cdb[7] = format.toByte()
+        cdb[8] = (allocation shr 8).toByte()
+        cdb[9] = allocation.toByte()
+        val media = if (mediaType == 1) "BD" else "DVD"
+        return ScsiCommand.dataIn(cdb, allocation, "READ DISC STRUCTURE（$media 格式 ${Hex.byte(format)}h）", timeoutMs = 10_000)
+    }
+
+    /**
+     * GET PERFORMANCE（ACh），Type 00h：名义读取性能（Data Type 10h：容差 10%、读、Except=00），与 libburn 相同。
+     * 返回 8 字节头 + 每个描述符 16 字节。
+     */
+    fun getReadPerformance(maxDescriptors: Int): ScsiCommand {
+        require(maxDescriptors in 1..255)
+        val cdb = ByteArray(12)
+        cdb[0] = 0xAC.toByte()
+        cdb[1] = 0x10
+        cdb[8] = (maxDescriptors shr 8).toByte()
+        cdb[9] = maxDescriptors.toByte()
+        cdb[10] = 0x00
+        return ScsiCommand.dataIn(cdb, 8 + 16 * maxDescriptors, "GET PERFORMANCE（读取速度）", timeoutMs = 10_000)
+    }
+
+    private fun putBe32(b: ByteArray, at: Int, v: Long) {
+        b[at] = (v ushr 24).toByte()
+        b[at + 1] = (v ushr 16).toByte()
+        b[at + 2] = (v ushr 8).toByte()
+        b[at + 3] = v.toByte()
+    }
 }
