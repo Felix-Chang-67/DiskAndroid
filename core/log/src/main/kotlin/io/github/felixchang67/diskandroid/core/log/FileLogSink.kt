@@ -58,6 +58,17 @@ class FileLogSink(
 
     fun textFiles(): List<File> = sessionFiles().filter { it.name.endsWith(".log") }
 
+    /** 最近 [maxSessions] 个会话（含本会话）的全部日志文件，按会话从旧到新排列。 */
+    fun recentSessionFiles(maxSessions: Int): List<File> {
+        flush()
+        val files = dir.listFiles { f -> f.isFile && (f.name.endsWith(".log") || f.name.endsWith(".jsonl")) } ?: return emptyList()
+        return files.groupBy { sessionOf(it.name) }.entries
+            .sortedByDescending { (_, fs) -> fs.maxOf { it.lastModified() } }
+            .take(maxSessions)
+            .reversed()
+            .flatMap { (_, fs) -> fs.sortedBy { it.name } }
+    }
+
     override fun write(record: LogRecord) {
         val text = LogFormat.text(record)
         val json = LogFormat.json(record)
@@ -118,8 +129,10 @@ class FileLogSink(
     private fun pruneOldSessions() {
         val files = dir.listFiles { f -> f.isFile && (f.name.endsWith(".log") || f.name.endsWith(".jsonl")) }
             ?: return
-        val sessions = files.groupBy { it.name.substringBefore('.').substringBefore("-part") }
+        val sessions = files.groupBy { sessionOf(it.name) }
         val ordered = sessions.entries.sortedByDescending { (_, fs) -> fs.maxOf { it.lastModified() } }
         ordered.drop(keepSessions).forEach { (_, fs) -> fs.forEach { it.delete() } }
     }
+
+    private fun sessionOf(fileName: String) = fileName.substringBefore('.').substringBefore("-part")
 }

@@ -21,4 +21,8 @@ rootProject.name = "DiskAndroid"
 
 include(":app")
 include(":core:log")
+include(":core:scsi")
+include(":core:mmc")
+include(":core:drive")
+include(":core:testing")
 include(":core:usb")

@@ -27,7 +27,7 @@ class MainActivitySmokeTest {
 
     @Test
     fun narrowLayoutShowsGuideCopiesDiagnosticsAndShowsLogs() {
-        compose.onNodeWithText("测试节点 N1.1：USB 枚举与权限").assertIsDisplayed()
+        compose.onNodeWithText("：光驱通信（BOT 传输 + 基础命令）", substring = true).assertIsDisplayed()
         // 小屏上后面的卡片在可视区外，LazyColumn 不会组合它们，先滚过去
         val deviceList = compose.onNode(hasScrollToKeyAction())
         deviceList.performScrollToKey("empty")
@@ -56,7 +56,7 @@ class MainActivityWideLayoutTest {
 
     @Test
     fun tabletLandscapeShowsDeviceAndLogPanesSideBySide() {
-        compose.onNodeWithText("测试节点 N1.1：USB 枚举与权限").assertIsDisplayed()
+        compose.onNodeWithText("：光驱通信（BOT 传输 + 基础命令）", substring = true).assertIsDisplayed()
         compose.onNodeWithText("自动滚动").assertIsDisplayed()
     }
 }

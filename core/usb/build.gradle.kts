@@ -28,6 +28,7 @@ android {
 
 dependencies {
     api(project(":core:log"))
+    api(project(":core:scsi"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
 

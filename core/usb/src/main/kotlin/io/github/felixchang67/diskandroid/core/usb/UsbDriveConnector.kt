@@ -89,13 +89,17 @@ class ProbeReport(
     }
 }
 
+/** 连接结果：诊断报告 + （成功且要求保持时）已占用接口的连接。 */
+class ConnectResult(val report: ProbeReport, val opened: OpenedUsbDrive?)
+
 /**
- * N1.1 的"连接测试"：打开设备 → 读原始描述符 → 查内核驱动 / 链路速度 / usbfs 能力 →
- * 选择 BOT 接口 → 强制占用（断开内核 usb-storage 驱动）→ Get Max LUN → 释放。
+ * 连接光驱：打开设备 → 读原始描述符 → 查内核驱动 / 链路速度 / usbfs 能力 →
+ * 选择 BOT 接口 → 强制占用（断开内核 usb-storage 驱动）→ Get Max LUN →
+ * [keepOpen] 时保持占用、交给光驱会话；否则释放（只做诊断）。
  *
- * 只做 USB 层面的只读操作，不发送任何 SCSI 命令。
+ * 这一步只做 USB 层面的操作，不发送 SCSI 命令。
  */
-class UsbConnectionProbe(private val usbManager: UsbManager, private val log: DiskLog) {
+class UsbDriveConnector(private val usbManager: UsbManager, private val log: DiskLog) {
     companion object {
         private const val TAG = LogTags.PROBE
         private const val GET_MAX_LUN_TIMEOUT_MS = 2000
@@ -105,11 +109,12 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
         private const val BOT_GET_MAX_LUN_REQUEST = 0xFE
     }
 
-    suspend fun run(device: UsbDevice): ProbeReport = withContext(Dispatchers.IO) { probe(device) }
+    suspend fun connect(device: UsbDevice, keepOpen: Boolean = true): ConnectResult =
+        withContext(Dispatchers.IO) { probe(device, keepOpen) }
 
     private fun now() = SystemClock.elapsedRealtime()
 
-    private fun probe(device: UsbDevice): ProbeReport {
+    private fun probe(device: UsbDevice, keepOpen: Boolean): ConnectResult {
         val startedWall = System.currentTimeMillis()
         val t0 = now()
         val vidPid = "${Hex.word(device.vendorId)}:${Hex.word(device.productId)}"
@@ -123,6 +128,7 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
         val driversAfter = linkedMapOf<Int, String>()
         var selection: MassStorageSelection = MassStorageSelection.NotMassStorage
         var maxLun: Int? = null
+        var opened: OpenedUsbDrive? = null
 
         val nativeInfo = if (UsbfsNative.isAvailable) {
             runCatching { UsbfsNative.nativeVersion() }.getOrDefault("?")
@@ -181,7 +187,7 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
         }
         if (connection == null) {
             record("打开设备", false, "openDevice 失败：可能没有 USB 权限，或设备已经断开", t)
-            return buildReport()
+            return ConnectResult(buildReport(), null)
         }
         record("打开设备", true, "文件描述符 fd=${connection.fileDescriptor}", t)
 
@@ -263,10 +269,13 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
                         if (claimed) "接口 ${intf.id} 已占用" else "claimInterface 返回 false（可能被其他应用占用）", t,
                     )
                     if (claimed) {
+                        var handedOver = false
                         try {
+                            var interfaceReady = true
                             if (selected.needsSetInterface) {
                                 t = now()
                                 val ok = connection.setInterface(intf)
+                                interfaceReady = ok
                                 record(
                                     "切换到 BOT 备用设置 ${intf.alternateSetting}", ok,
                                     if (ok) "SET_INTERFACE 成功" else "SET_INTERFACE 失败", t,
@@ -301,9 +310,26 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
                                     )
                                 }
                             }
+
+                            // 6. 保持占用，交给光驱会话（BOT 传输）
+                            if (keepOpen && interfaceReady) {
+                                val endpoints = (0 until intf.endpointCount).map { intf.getEndpoint(it) }
+                                val epIn = endpoints.firstOrNull { it.address == selected.bulkIn.address }
+                                val epOut = endpoints.firstOrNull { it.address == selected.bulkOut.address }
+                                if (epIn != null && epOut != null) {
+                                    val io = AndroidUsbBulkIo(usbManager, device, connection, intf, epIn, epOut)
+                                    opened = OpenedUsbDrive(device, connection, intf, io, maxLun)
+                                    handedOver = true
+                                    log.i(TAG, "接口保持占用，交给光驱会话", "bulk IN" to "0x${Hex.byte(epIn.address)}", "bulk OUT" to "0x${Hex.byte(epOut.address)}")
+                                } else {
+                                    record("查找端点对象", false, "找不到 bulk 端点对象", now())
+                                }
+                            }
                         } finally {
-                            val released = connection.releaseInterface(intf)
-                            log.i(TAG, "释放接口", "结果" to released)
+                            if (!handedOver) {
+                                val released = connection.releaseInterface(intf)
+                                log.i(TAG, "释放接口", "结果" to released)
+                            }
                         }
                     }
                 }
@@ -312,9 +338,9 @@ class UsbConnectionProbe(private val usbManager: UsbManager, private val log: Di
             log.e(TAG, "连接测试异常", throwable = e)
             steps += ProbeStep("异常", false, e.toString(), 0, critical = true)
         } finally {
-            runCatching { connection.close() }
+            if (opened == null) runCatching { connection.close() }
         }
-        return buildReport()
+        return ConnectResult(buildReport(), opened)
     }
 
     private fun notesSuffix(notes: List<String>) = if (notes.isEmpty()) "" else "；" + notes.joinToString("；")
