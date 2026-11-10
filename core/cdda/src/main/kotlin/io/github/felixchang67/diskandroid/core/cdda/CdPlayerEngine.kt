@@ -100,6 +100,13 @@ class CdPlayerEngine(
         val speedKBps: Int? = 706,
         /** 手动点歌、跳转、换轨时的淡入毫秒数（防止爆音；测试里设 0 以便逐字节比对）。 */
         val shortFadeMs: Int = SHORT_FADE_MS,
+        /**
+         * 播放中手动切歌 / 跳转的接缝（毫秒）：旧的声音一直播到新位置的数据就绪，然后直接接上（gapless，不插静音）。
+         * 接缝处只做这么短的平滑，防止波形突变"啪"一声，听起来就是直接切过去。0 表示不做无缝切换（先停下、再从新位置开始）。
+         */
+        val crossfadeMs: Int = SWITCH_SPLICE_MS,
+        /** 预读下一首开头多少扇区（按"下一首"时直接用，不等光驱寻道）。192 扇区约 2.6 秒。 */
+        val prefetchSectors: Int = 192,
     )
 
     private val scope = CoroutineScope(SupervisorJob(parentScope.coroutineContext[Job]) + dispatcher + CoroutineName("cd-player"))
@@ -114,6 +121,12 @@ class CdPlayerEngine(
 
     private class Marker(val frame: Long, val lba: Long, val track: CdTrack)
 
+    /** 等待衔接的新位置：新生产者把数据读进 [channel]，写入协程拿到第一块后直接接上。 */
+    private class Switch(val gen: Int, val channel: Channel<Chunk>, val track: CdTrack, val lba: Long)
+
+    /** 预读好的"下一首开头"（已经做过字节序 / 去加重处理；[deemph] 是接着往下处理用的滤波器状态）。 */
+    private class Prefetch(val track: CdTrack, val chunks: List<Chunk>, val endLba: Long, val deemph: Deemphasis)
+
     private var generation = 0
     private var producer: Job? = null
     private var writer: Job? = null
@@ -127,6 +140,12 @@ class CdPlayerEngine(
     private var pendingTrack: CdTrack? = null
     private var pendingLba = 0L
     private var lastLoggedTrack: CdTrack? = null
+    private var pendingSwitch: Switch? = null
+    private var prefetched: Prefetch? = null
+    /** 从按下切歌到新歌真正响起之间，界面显示新位置（避免进度在新旧两首之间来回跳）。 */
+    private var switchDisplay: Pair<CdTrack, Long>? = null
+    /** 交叉淡化那一段在输出流里的起点（帧）；播放头过了这里就改按实际位置显示。 */
+    private var switchAudibleFrame = -1L
     private var badSectors = 0
     private var bigEndian: Boolean? = when (options.byteOrder) {
         ByteOrderMode.AUTO -> null
@@ -146,7 +165,7 @@ class CdPlayerEngine(
             ?: currentTrack()?.takeIf { status != PlayerState.Status.ENDED }
             ?: album.first
         paused = false
-        startAt(t, lbaFor(t, positionMs), fadeInMs)
+        switchOrStart(t, lbaFor(t, positionMs), fadeInMs)
     }
 
     fun pause() = post {
@@ -188,19 +207,19 @@ class CdPlayerEngine(
 
     fun next() = post {
         val t = currentTrack() ?: return@post
-        album.next(t)?.let { startAt(it, it.startLba) }
+        album.next(t)?.let { switchOrStart(it, it.startLba) }
     }
 
     /** 当前轨已播放超过 3 秒：回到本轨开头；否则上一轨。 */
     fun previous() = post {
         val t = currentTrack() ?: return@post
         val p = album.previous(t)
-        if (positionInTrack() > 3_000 || p == null) startAt(t, t.startLba) else startAt(p, p.startLba)
+        if (positionInTrack() > 3_000 || p == null) switchOrStart(t, t.startLba) else switchOrStart(p, p.startLba)
     }
 
     fun seekTo(positionMs: Long) = post {
         val t = currentTrack() ?: return@post
-        startAt(t, lbaFor(t, positionMs))
+        switchOrStart(t, lbaFor(t, positionMs))
     }
 
     fun stop() = post { stopInternal(PlayerState.Status.STOPPED, null) }
@@ -228,6 +247,33 @@ class CdPlayerEngine(
 
     // ---------------- 流水线 ----------------
 
+    /**
+     * 正在出声时手动切歌 / 跳转：无缝切换——停掉旧的生产者，但已经缓冲的旧音频继续播；新生产者从新位置读，
+     * 写入协程拿到新数据后用 [Options.crossfadeMs] 的交叉淡化接上，中间没有静音。
+     * 暂停中、还没出声、或关闭了交叉淡化时，退回普通的"停下再开始"。
+     */
+    private suspend fun switchOrStart(track: CdTrack, lba: Long, fadeInMs: Int = options.shortFadeMs) {
+        val audible = !paused && writer?.isActive == true && framesWritten > 0 &&
+            (status == PlayerState.Status.PLAYING || status == PlayerState.Status.BUFFERING)
+        if (options.crossfadeMs <= 0 || !audible) return startAt(track, lba, fadeInMs)
+        producer?.cancel()
+        pendingSwitch?.channel?.cancel()
+        val gen = ++generation
+        val channel = Channel<Chunk>(options.bufferChunks)
+        pendingSwitch = Switch(gen, channel, track, lba)
+        switchDisplay = track to lba
+        switchAudibleFrame = -1
+        val pre = takePrefetch(track, lba)
+        pre?.chunks?.forEach { channel.trySend(it) }
+        producer = scope.launch { produce(gen, track, pre?.endLba ?: lba, channel, 0, pre?.deemph) }
+        log.i(
+            TAG, "无缝切换到第 ${track.number} 轨「${track.title}」", "位置" to formatMs((lba - track.startLba) * 1000 / SECTORS_PER_SECOND), "LBA" to lba,
+            "预读" to (pre?.let { "已有开头 ${(it.endLba - lba) * 1000 / SECTORS_PER_SECOND} ms，直接接上" } ?: "无，等光驱读到"),
+        )
+        lastLoggedTrack = track
+        publish()
+    }
+
     private suspend fun startAt(track: CdTrack, lba: Long, fadeInMs: Int = options.shortFadeMs) {
         cancelPipeline()
         if (!speedApplied && options.speedKBps != null) {
@@ -242,7 +288,10 @@ class CdPlayerEngine(
         log.i(TAG, "开始播放第 ${track.number} 轨「${track.title}」", "位置" to formatMs((lba - track.startLba) * 1000 / SECTORS_PER_SECOND), "LBA" to lba)
         lastLoggedTrack = track
         val channel = Channel<Chunk>(options.bufferChunks)
-        producer = scope.launch { produce(gen, track, lba, channel, fadeInMs * 44_100 / 1000) }
+        // 暂停中按"下一首"等：有预读就直接用（这时不做起播淡入，预读的数据已经处理好）
+        val pre = if (fadeInMs <= options.shortFadeMs) takePrefetch(track, lba) else null
+        pre?.chunks?.forEach { channel.trySend(it) }
+        producer = scope.launch { produce(gen, track, pre?.endLba ?: lba, channel, if (pre != null) 0 else fadeInMs * 44_100 / 1000, pre?.deemph) }
         writer = scope.launch { consume(gen, channel) }
         if (!paused) output.play()
         if (ticker == null) ticker = scope.launch { tick() }
@@ -253,6 +302,10 @@ class CdPlayerEngine(
         generation++ // 旧流水线晚到的通知一律作废
         producer?.cancel()
         producer = null
+        pendingSwitch?.channel?.cancel()
+        pendingSwitch = null
+        switchDisplay = null
+        switchAudibleFrame = -1
         writer?.cancelAndJoin()
         writer = null
         output.pause()
@@ -263,6 +316,7 @@ class CdPlayerEngine(
 
     private suspend fun stopInternal(newStatus: PlayerState.Status, reason: String?) {
         cancelPipeline()
+        prefetched = null
         ticker?.cancel()
         ticker = null
         paused = false
@@ -281,15 +335,21 @@ class CdPlayerEngine(
         runCatching { reader.setSpeed(0xFFFF) }
     }
 
-    private suspend fun produce(gen: Int, startTrack: CdTrack, startLba: Long, ch: SendChannel<Chunk>, fadeFrames: Int) {
+    private suspend fun produce(gen: Int, startTrack: CdTrack, startLba: Long, ch: SendChannel<Chunk>, fadeFrames: Int, initialDeemph: Deemphasis? = null) {
         var track: CdTrack? = startTrack
         var lba = startLba
-        val deemph = Deemphasis()
+        val deemph = initialDeemph ?: Deemphasis()
         var faded = 0
+        // 接着预读的数据往下读时沿用预读时的滤波器状态
+        var lastEmphasis: Boolean? = if (initialDeemph != null) startTrack.preEmphasis else null
         try {
             while (track != null) {
                 val t: CdTrack = track
-                deemph.reset()
+                // 连续两首处理方式相同时滤波器状态不清零：曲目交界处保持连续（Live 专辑首尾相连不会"咔"一声）
+                if (t.preEmphasis != lastEmphasis) {
+                    deemph.reset()
+                    lastEmphasis = t.preEmphasis
+                }
                 while (lba < t.endLba) {
                     val count = minOf(options.chunkSectors.toLong(), t.endLba - lba).toInt()
                     val buf = ByteArray(count * SECTOR_BYTES)
@@ -318,7 +378,12 @@ class CdPlayerEngine(
                         PcmGain.ramp(buf, 0, n, faded.toDouble() / fadeFrames, (faded + n).toDouble() / fadeFrames)
                         faded += n
                     }
-                    ch.send(Chunk(lba, t, buf))
+                    val chunk = Chunk(lba, t, buf)
+                    if (ch.trySend(chunk).isFailure) {
+                        // 缓冲已满（约 10 秒）：趁光驱空闲预读一块"下一首"的开头，然后再等通道空位
+                        prefetchStep(gen)
+                        ch.send(chunk)
+                    }
                     lba += count
                 }
                 track = album.next(t)
@@ -327,6 +392,39 @@ class CdPlayerEngine(
         } finally {
             ch.close()
         }
+    }
+
+    /**
+     * 预读一块"正在播放的这一首的下一首"的开头（每次只读一块，读够 [Options.prefetchSectors] 为止）。
+     * 预读失败不影响播放（真正读到那里时由生产者照常处理错误）。
+     */
+    private suspend fun prefetchStep(gen: Int) {
+        if (gen != generation || options.prefetchSectors <= 0) return
+        val playing = position()?.first ?: return
+        val next = album.next(playing) ?: return
+        val have = prefetched?.takeIf { it.track === next }
+        val target = minOf(next.startLba + options.prefetchSectors, next.endLba)
+        val from = have?.endLba ?: next.startLba
+        if (from >= target) return
+        val count = minOf(options.chunkSectors.toLong(), target - from).toInt()
+        val buf = ByteArray(count * SECTOR_BYTES)
+        when (val r = reader.read(from, count, buf)) {
+            CddaReader.Result.Ok -> Unit
+            is CddaReader.Result.Partial -> PcmGain.fadeAroundSilence(buf, from, r.bad)
+            is CddaReader.Result.Stop -> return
+        }
+        if (gen != generation) return
+        val deemph = have?.deemph ?: Deemphasis()
+        process(buf, next, deemph)
+        prefetched = Prefetch(next, have?.chunks.orEmpty() + Chunk(from, next, buf), from + count, deemph)
+        if (from + count >= target) log.v(TAG, "已预读第 ${next.number} 轨开头 ${(target - next.startLba) * 1000 / SECTORS_PER_SECOND} ms")
+    }
+
+    /** 要从 [lba] 播 [track]，而且正好预读过这一首的开头：取出来用（用过即清）。 */
+    private fun takePrefetch(track: CdTrack, lba: Long): Prefetch? {
+        val p = prefetched ?: return null
+        prefetched = null
+        return p.takeIf { it.track === track && lba == track.startLba && it.chunks.isNotEmpty() }
     }
 
     private fun process(buf: ByteArray, track: CdTrack, deemph: Deemphasis) {
@@ -340,46 +438,125 @@ class CdPlayerEngine(
         if (track.preEmphasis && options.deemphasis) deemph.process(buf)
     }
 
-    private suspend fun consume(gen: Int, ch: ReceiveChannel<Chunk>) {
-        for (chunk in ch) {
-            markers.addLast(Marker(framesWritten, chunk.lba, chunk.track))
-            var off = 0
-            while (off < chunk.data.size) {
-                if (paused) {
-                    delay(PAUSED_POLL_MS)
+    /**
+     * 写入协程：把块非阻塞地写进输出。自然播到下一首时数据本来就是连续的（gapless，不插静音）；
+     * 手动切歌时继续写旧数据，直到新位置的第一块到达，再直接接上（接缝做 10 ms 平滑）。
+     */
+    private suspend fun consume(gen0: Int, ch0: ReceiveChannel<Chunk>) {
+        var gen = gen0
+        var ch = ch0
+        var cur: Chunk? = null
+        var off = 0
+        var draining = false
+        var tailMs = 0L
+        var waited = 0L
+        while (true) {
+            val sw = pendingSwitch
+            if (sw != null && !paused) {
+                val first = sw.channel.tryReceive().getOrNull()
+                if (first != null) {
+                    val mixed = crossfade(cur, off, ch, first)
+                    ch.cancel()
+                    ch = sw.channel
+                    gen = sw.gen
+                    pendingSwitch = null
+                    draining = false
+                    cur = Chunk(first.lba, first.track, mixed)
+                    off = 0
+                    switchAudibleFrame = framesWritten
+                    markers.addLast(Marker(framesWritten, first.lba, first.track))
                     continue
                 }
-                val n = output.write(chunk.data, off, chunk.data.size - off)
+            }
+            if (cur == null) {
+                val r = ch.tryReceive()
+                val next = r.getOrNull()
                 when {
-                    n < 0 -> {
-                        post { if (gen == generation) stopInternal(PlayerState.Status.ERROR, "音频输出出错（$n）") }
-                        return
+                    next != null -> {
+                        cur = next
+                        off = 0
+                        markers.addLast(Marker(framesWritten, next.lba, next.track))
                     }
-                    n == 0 -> delay(WRITE_POLL_MS)
-                    else -> off += n
+                    r.isClosed && pendingSwitch == null -> {
+                        // 数据全部写完：把剩下的播完（不计暂停时间，最多再等"剩余时长 + 3 秒"，防止输出端卡住时永远等下去）；期间仍可切歌
+                        if (!draining) {
+                            draining = true
+                            output.drain()
+                            tailMs = (framesWritten - output.playedFrames).coerceAtLeast(0) * 1000 / 44_100
+                            waited = 0
+                        }
+                        if (output.playedFrames >= framesWritten || waited >= tailMs + 3_000) {
+                            val endedGen = gen
+                            post {
+                                if (endedGen == generation && status != PlayerState.Status.ERROR) {
+                                    ticker?.cancel()
+                                    ticker = null
+                                    status = PlayerState.Status.ENDED
+                                    log.i(TAG, "专辑播放完毕")
+                                    logStats()
+                                    restoreSpeed()
+                                    publish()
+                                }
+                            }
+                            return
+                        }
+                        delay(END_POLL_MS)
+                        if (!paused) waited += END_POLL_MS
+                    }
+                    else -> delay(WRITE_POLL_MS) // 暂时没有数据：欠载，或者旧数据已经播完、正在等新位置的数据
+                }
+                continue
+            }
+            if (paused) {
+                delay(PAUSED_POLL_MS)
+                continue
+            }
+            val n = output.write(cur.data, off, cur.data.size - off)
+            when {
+                n < 0 -> {
+                    val errGen = gen
+                    post { if (errGen == generation) stopInternal(PlayerState.Status.ERROR, "音频输出出错（$n）") }
+                    return
+                }
+                n == 0 -> delay(WRITE_POLL_MS)
+                else -> {
+                    off += n
+                    framesWritten += n / BYTES_PER_FRAME
+                    if (off >= cur.data.size) cur = null
                 }
             }
-            framesWritten += chunk.data.size / BYTES_PER_FRAME
         }
-        // 生产者已结束：数据全部写入，把剩下的播完（不计暂停时间，最多再等"剩余时长 + 3 秒"，防止输出端卡住时永远等下去）
-        output.drain()
-        val tailMs = (framesWritten - output.playedFrames).coerceAtLeast(0) * 1000 / 44_100
-        var waited = 0L
-        while (output.playedFrames < framesWritten && waited < tailMs + 3_000) {
-            delay(END_POLL_MS)
-            if (!paused) waited += END_POLL_MS
+    }
+
+    /**
+     * 接缝：取"旧音频接下来还没写出的一小段"（[Options.crossfadeMs]，默认 10 ms），与新位置开头逐帧混合，
+     * 旧的增益从 1 线性降到 0、新的从 0 升到 1，只为消除波形突变的"啪"声；之后完全是新位置的数据（gapless，不插静音）。
+     * 旧数据不够长时，缺的部分当作静音。
+     */
+    private fun crossfade(cur: Chunk?, off: Int, oldChannel: ReceiveChannel<Chunk>, first: Chunk): ByteArray {
+        val xfade = minOf(options.crossfadeMs * 44_100 / 1000, first.data.size / BYTES_PER_FRAME)
+        val old = java.io.ByteArrayOutputStream(xfade * BYTES_PER_FRAME)
+        if (cur != null && off < cur.data.size) old.write(cur.data, off, minOf(cur.data.size - off, xfade * BYTES_PER_FRAME))
+        while (old.size() < xfade * BYTES_PER_FRAME) {
+            val c = oldChannel.tryReceive().getOrNull() ?: break
+            old.write(c.data, 0, minOf(c.data.size, xfade * BYTES_PER_FRAME - old.size()))
         }
-        post {
-            if (gen == generation && status != PlayerState.Status.ERROR) {
-                ticker?.cancel()
-                ticker = null
-                status = PlayerState.Status.ENDED
-                log.i(TAG, "专辑播放完毕")
-                logStats()
-                restoreSpeed()
-                publish()
+        val o = old.toByteArray()
+        val oldFrames = o.size / BYTES_PER_FRAME
+        val out = first.data.copyOf()
+        for (f in 0 until xfade) {
+            val g = f.toDouble() / xfade
+            for (c in 0 until 2) {
+                val i = f * BYTES_PER_FRAME + c * 2
+                val vNew = (out[i + 1].toInt() shl 8) or (out[i].toInt() and 0xFF)
+                val vOld = if (f < oldFrames) (o[i + 1].toInt() shl 8) or (o[i].toInt() and 0xFF) else 0
+                val v = Math.round(vOld * (1 - g) + vNew * g).toInt().coerceIn(-32768, 32767)
+                out[i] = v.toByte()
+                out[i + 1] = (v shr 8).toByte()
             }
         }
+        log.v(TAG, "接上第 ${first.track.number} 轨（接缝平滑 ${xfade * 1000 / 44_100} ms）")
+        return out
     }
 
     private suspend fun tick() {
@@ -393,6 +570,10 @@ class CdPlayerEngine(
 
     private fun position(): Pair<CdTrack, Long>? {
         val played = output.playedFrames
+        switchDisplay?.let { shown ->
+            if (switchAudibleFrame < 0 || played < switchAudibleFrame) return shown
+            switchDisplay = null
+        }
         while (markers.size > 1 && markers[1].frame <= played) markers.removeFirst()
         val m = markers.firstOrNull() ?: return pendingTrack?.let { it to pendingLba }
         val lba = m.lba + (played - m.frame).coerceAtLeast(0) / FRAMES_PER_SECTOR
@@ -462,5 +643,8 @@ class CdPlayerEngine(
 
         /** 自动播放的淡入。 */
         const val AUTOPLAY_FADE_MS = 1_000
+
+        /** 播放中手动切歌 / 跳转时接缝处的平滑长度（只为防止"啪"声）。 */
+        const val SWITCH_SPLICE_MS = 10
     }
 }

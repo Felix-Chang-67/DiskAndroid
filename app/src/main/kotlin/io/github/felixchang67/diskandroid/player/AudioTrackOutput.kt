@@ -8,14 +8,15 @@ import io.github.felixchang67.diskandroid.core.log.DiskLog
 
 /**
  * 用 AudioTrack（流模式，44.1 kHz / 16 位 / 立体声）实现 [AudioOutput]。写入用非阻塞模式，
- * 播放器线程不会卡在 write() 里，暂停 / 跳转 / 停止随时可以响应。缓冲约 0.5 秒。
+ * 播放器线程不会卡在 write() 里，暂停 / 跳转 / 停止随时可以响应。缓冲约 0.2 秒。
  */
 class AudioTrackOutput(log: DiskLog) : AudioOutput {
     private val track: AudioTrack
 
     init {
         val min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-        val size = maxOf(min * 4, SAMPLE_RATE * 4 / 2)
+        // 约 0.2 秒：自己的读盘缓冲已有约 10 秒，这里只需扛住线程调度抖动；越小，手动切歌时新歌接上得越快
+        val size = maxOf(min * 2, SAMPLE_RATE * 4 / 5)
         track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()

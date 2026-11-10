@@ -285,7 +285,7 @@ class FakeMmc {
 
     /**
      * READ CD：只支持 CD-DA（期望扇区类型 0 或 1，字节 9 含用户数据位）。音频内容是确定的正弦波，
-     * 第 N 轨频率 220×N Hz，左声道 sin、右声道 cos，振幅 6000，方便测试检查字节序和连续性。
+     * 第 N 轨频率 220×N Hz，左声道 sin、右声道 cos，振幅 6000，再加一个随扇区号变化的小偏移，方便测试检查字节序、连续性和接缝。
      */
     private fun readCd(cdb: ByteArray): Reply {
         val d = disc!!
@@ -324,10 +324,12 @@ class FakeMmc {
 
     private fun fillAudio(out: ByteArray, offset: Int, sector: Long, track: Int) {
         val w = 2 * Math.PI * 220.0 * track / 44_100.0
+        // 每个扇区再加一个随扇区号变化的小偏移：同一首里不同位置的数据也互不相同（测试接缝位置时不会因正弦周期性重合而误判）
+        val mark = (sector % 997).toInt()
         for (f in 0 until 588) {
             val n = sector * 588 + f
-            val l = (6000 * kotlin.math.sin(w * n)).toInt()
-            val r = (6000 * kotlin.math.cos(w * n)).toInt()
+            val l = (6000 * kotlin.math.sin(w * n)).toInt() + mark
+            val r = (6000 * kotlin.math.cos(w * n)).toInt() - mark
             putSample(out, offset + f * 4, l)
             putSample(out, offset + f * 4 + 2, r)
         }

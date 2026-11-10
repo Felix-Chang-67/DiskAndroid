@@ -138,6 +138,11 @@ fun CdPlayerSection(
         }
 
         Text("播放设置", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
+        Text(
+            "无缝播放（gapless）：一首播完紧接着下一首，中间不留空白；播放中按“下一首”（提前预读好开头）、点别的曲目或拖动进度，声音都不中断。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Switch(checked = autoplayEnabled, onCheckedChange = { player.setAutoplay(it) })
             Text("放入音乐 CD 后自动播放（2 秒后开始，可取消）", style = MaterialTheme.typography.bodySmall)
