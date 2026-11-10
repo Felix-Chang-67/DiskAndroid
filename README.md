@@ -22,7 +22,8 @@
 | `core:drive` | 光驱会话：单线程命令队列、盘片/托盘状态机、轮询、事件；盘片信息读取（容量、TOC、轨道、盘片结构、CD-TEXT） |
 | `core:cdda` | 音乐 CD 播放（纯 Kotlin）：READ CD 读取与重试 / 静音、字节序检测、去加重、播放引擎（缓冲、换轨、跳转） |
 | `core:meta` | 在线曲目信息（纯 Kotlin）：MusicBrainz 光盘 ID、MusicBrainz / 网易云音乐 / LRCLIB 客户端、时长比对、LRC 歌词解析、本机缓存 |
-| `core:rip` | 读成 ISO（纯 Kotlin）：读取计划（数据区 / 补零区）、两遍读取引擎、ddrescue 格式 mapfile、读盘报告与校验值 |
+| `core:fs` | 盘上的文件系统（纯 Kotlin）：ISO 9660 / Joliet / Rock Ridge、UDF 1.02–2.60（元数据分区、备用表、VAT）、卷标解码（UTF-8 / Shift-JIS / GBK）、盘片内容识别、文件系统结尾 |
+| `core:rip` | 读成 ISO（纯 Kotlin）：读取计划（数据区 / 补零区，可重写盘只读到文件系统结尾）、两遍读取引擎、ddrescue 格式 mapfile、读盘报告与校验值 |
 | `core:testing` | 测试替身：模拟 MMC 光驱（FakeMmc）与可注入故障的 BOT 设备（FakeBotDevice） |
 | `core:usb` | USB 枚举、热插拔、权限、描述符解析、BOT 接口选择、连接与占用、Android bulkTransfer 适配 |
 | `native/diskcore` | usbfs ioctl 辅助（链路速度、内核驱动、CLEAR_HALT、RESET）；后续承载原生传输层 |

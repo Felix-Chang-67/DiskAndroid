@@ -93,6 +93,9 @@ class DriveSession(
 
     val description: String get() = transport.description
 
+    /** BOT 复位恢复的累计次数（读盘报告里统计"中途复位了几次"用）。 */
+    val resetCount: Long get() = transport.resetCount
+
     fun start() {
         if (job != null) return
         job = scope.launch(dispatcher) {

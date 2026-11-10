@@ -26,7 +26,10 @@ class RipPlan(
     val totalSectors: Long,
     val areas: List<RipArea>,
     val warnings: List<String>,
+    /** READ CAPACITY 报告的扇区数；可重写盘只读到文件系统结尾时比 [totalSectors] 大。 */
+    val capacitySectors: Long = totalSectors,
 ) {
+    val trimmed: Boolean get() = totalSectors < capacitySectors
     val bytes: Long get() = totalSectors * SECTOR
     val dataSectors: Long get() = areas.filter { it.kind == RipArea.Kind.DATA }.sumOf { it.sectors }
     val gapSectors: Long get() = totalSectors - dataSectors
@@ -46,7 +49,14 @@ class RipPlan(
     companion object {
         const val SECTOR = 2048
 
-        fun from(disc: DiscInfo): Build {
+        /** 可覆写的盘：READ CAPACITY 是整张盘格式化后的容量，和刻进去的数据多少无关。 */
+        fun isOverwritable(profile: Int) = profile in setOf(0x12, 0x13, 0x1A, 0x2A, 0x43)
+
+        /**
+         * @param fileSystemEnd 文件系统在盘上的结尾（见 DiscFs.volumeEnd）。可覆写的盘有它时只读到这里：
+         *   这样读出来的镜像与当初刻进去的 ISO 一致，不会带上几 GB 没用的旧数据。
+         */
+        fun from(disc: DiscInfo, fileSystemEnd: Long? = null): Build {
             val family = disc.family
             if (family != MmcNames.DiscFamily.CD && family != MmcNames.DiscFamily.DVD && family != MmcNames.DiscFamily.BD) {
                 return Build.Refused("暂不支持这种盘（${MmcNames.profileName(disc.profile)}）")
@@ -58,9 +68,16 @@ class RipPlan(
                 )
             }
             val capacity = disc.capacity ?: return Build.Refused("读不到盘片容量（READ CAPACITY 失败）")
-            val total = capacity.blocks
-            if (total <= 0) return Build.Refused("盘片是空的")
+            val full = capacity.blocks
+            if (full <= 0) return Build.Refused("盘片是空的")
             val warnings = mutableListOf<String>()
+            val total = if (fileSystemEnd != null && isOverwritable(disc.profile) && fileSystemEnd in 17 until full) {
+                warnings += "可重写盘：READ CAPACITY 是整张盘格式化后的 ${DiscInfo.formatBytes(full * SECTOR)}，文件系统只用到 " +
+                    "${DiscInfo.formatBytes(fileSystemEnd * SECTOR)}（$fileSystemEnd 扇区），只读到这里（后面是没用的旧数据或空白）"
+                fileSystemEnd
+            } else {
+                full
+            }
 
             val areas = mutableListOf<RipArea>()
             if (family == MmcNames.DiscFamily.CD) {
@@ -114,7 +131,7 @@ class RipPlan(
             disc.performance?.maxKBps?.takeIf { it in 1L..3_000L && family != MmcNames.DiscFamily.CD }?.let {
                 warnings += "光驱对这张盘只报 ${it} kB/s（视频盘常见的读速限制），读完需要较长时间"
             }
-            return Build.Ok(RipPlan(family, MmcNames.profileName(disc.profile), total, areas, warnings))
+            return Build.Ok(RipPlan(family, MmcNames.profileName(disc.profile), total, areas, warnings, full))
         }
     }
 }

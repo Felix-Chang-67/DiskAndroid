@@ -1,6 +1,7 @@
 package io.github.felixchang67.diskandroid.core.rip
 
 import io.github.felixchang67.diskandroid.core.drive.DiscInfo
+import io.github.felixchang67.diskandroid.core.fs.DiscVolume
 
 /** 读盘报告（.log，纯文本）：和镜像放在一起，方便以后核对。 */
 object RipReport {
@@ -13,6 +14,8 @@ object RipReport {
         options: RipOptions,
         imageName: String,
         result: RipResult,
+        volume: DiscVolume? = null,
+        incidents: List<String> = emptyList(),
     ): String {
         val sb = StringBuilder()
         fun line(s: String = "") = sb.append(s).append('\n')
@@ -20,7 +23,9 @@ object RipReport {
         line("开始时间：$startedAt")
         line("光驱：$drive")
         line("盘片：${disc.summary()}")
-        line("镜像：$imageName（${plan.totalSectors} 扇区 × ${RipPlan.SECTOR} 字节 = ${DiscInfo.formatBytes(plan.bytes)}）")
+        line("镜像：$imageName（${plan.totalSectors} 扇区 × ${RipPlan.SECTOR} 字节 = ${DiscInfo.formatBytes(plan.bytes)}）" +
+            if (plan.trimmed) "，整张盘 ${plan.capacitySectors} 扇区，只读到文件系统结尾" else "")
+        volume?.describeLines()?.forEach { line(it) }
         result.volume?.let { v ->
             line("ISO 9660 卷标：${v.volumeId ?: "（空）"}；卷大小 ${v.volumeSpaceSize ?: "?"} 扇区" + when {
                 v.volumeSpaceSize == null -> ""
@@ -40,6 +45,10 @@ object RipReport {
         line("用时：${result.elapsedMs / 1000 / 60} 分 ${result.elapsedMs / 1000 % 60} 秒；读出 ${result.readSectors} 扇区" +
             (if (result.elapsedMs > 0) "，平均 ${"%.2f".format(result.readSectors * RipPlan.SECTOR / 1e6 / (result.elapsedMs / 1000.0))} MB/s" else ""))
         line("第 2 遍补读回来：${result.recoveredSectors} 扇区")
+        if (incidents.isNotEmpty()) {
+            line("读盘过程中的意外（都已自动恢复，镜像数据不受影响）：")
+            incidents.forEach { line("  $it") }
+        }
         line("坏扇区（已补零）：${result.badSectors.size} 个" + if (result.badSectors.isNotEmpty()) "：" + ranges(result.badSectors) else "")
         if (result.runOutSectors.isNotEmpty()) line("CD 轨道末尾读不出的 run-out 扇区（按间隙补零，不算坏扇区）：" + ranges(result.runOutSectors))
         if (result.md5 != null) {

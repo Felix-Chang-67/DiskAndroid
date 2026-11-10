@@ -23,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -38,13 +39,21 @@ import io.github.felixchang67.diskandroid.core.rip.RipEngine
 import io.github.felixchang67.diskandroid.core.rip.RipOptions
 import io.github.felixchang67.diskandroid.core.rip.RipPlan
 import io.github.felixchang67.diskandroid.core.rip.RipResult
+import io.github.felixchang67.diskandroid.files.DiscBrowser
+import io.github.felixchang67.diskandroid.player.CdPlaybackController
 import io.github.felixchang67.diskandroid.rip.RipController
 import io.github.felixchang67.diskandroid.ui.theme.StatusColors
 
 /** 读成 ISO：保存位置、块大小 / 重试次数、开始 / 取消、进度、结果。 */
 @Composable
-fun RipSection(session: DriveSession, disc: DiscInfo, rip: RipController, onStart: (RipOptions) -> Unit) {
-    val build = remember(disc) { RipPlan.from(disc) }
+fun RipSection(session: DriveSession, disc: DiscInfo, rip: RipController, browser: DiscBrowser, onStart: (RipOptions) -> Unit) {
+    val states by browser.states.collectAsStateWithLifecycle()
+    val fingerprint = CdPlaybackController.fingerprint(disc)
+    val fsState = states[session]?.takeIf { it.fingerprint == fingerprint }
+    val rewritable = RipPlan.isOverwritable(disc.profile)
+    var trim by rememberSaveable { mutableStateOf(true) }
+    val fsEnd = fsState?.info?.fileSystemEnd
+    val build = remember(disc, fsEnd, trim) { RipPlan.from(disc, if (trim) fsEnd else null) }
     val folder by rip.folder.collectAsStateWithLifecycle()
     val state by rip.state.collectAsStateWithLifecycle()
     val mine = state?.takeIf { it.session === session }
@@ -74,6 +83,9 @@ fun RipSection(session: DriveSession, disc: DiscInfo, rip: RipController, onStar
             style = MaterialTheme.typography.bodySmall,
         )
         plan.warnings.forEach { Text("· $it", style = MaterialTheme.typography.bodySmall, color = StatusColors.warn) }
+        if (rewritable && fsState?.info == null) {
+            Text("· 可重写盘：正在读文件系统，读完后显示实际要读的大小", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
 
         when {
             mine?.running == true -> RipProgressView(mine, rip)
@@ -95,7 +107,14 @@ fun RipSection(session: DriveSession, disc: DiscInfo, rip: RipController, onStar
                     Text("坏扇区重试", Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.bodySmall)
                     listOf(1, 3, 5).forEach { n -> FilterChip(selected = retries == n, onClick = { retries = n }, label = { Text("$n 次") }) }
                 }
-                FilledTonalButton(onClick = { onStart(RipOptions(blockSectors = block, retries = retries)) }, enabled = folder != null && !rip.running) {
+                if (rewritable) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("可重写盘", Modifier.align(Alignment.CenterVertically), style = MaterialTheme.typography.bodySmall)
+                        FilterChip(selected = trim, onClick = { trim = true }, label = { Text("只读文件系统部分") })
+                        FilterChip(selected = !trim, onClick = { trim = false }, label = { Text("整张盘") })
+                    }
+                }
+                FilledTonalButton(onClick = { onStart(RipOptions(blockSectors = block, retries = retries, trimRewritable = trim)) }, enabled = folder != null && !rip.running) {
                     Text("开始读取")
                 }
                 Text(
@@ -112,7 +131,7 @@ fun RipSection(session: DriveSession, disc: DiscInfo, rip: RipController, onStar
 private fun RipProgressView(s: RipController.State, rip: RipController) {
     val p = s.progress
     val fraction = p?.let { (it.doneSectors.toFloat() / it.totalSectors.coerceAtLeast(1)).coerceIn(0f, 1f) } ?: 0f
-    Text("正在读：${s.imageName ?: "准备中…"}", style = MaterialTheme.typography.bodyMedium)
+    Text("正在读：${s.imageName ?: s.phase ?: "准备中…"}", style = MaterialTheme.typography.bodyMedium)
     LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
     if (p != null) {
         val elapsed = (System.currentTimeMillis() - s.startedAtMs) / 1000
@@ -151,7 +170,9 @@ private fun RipResultView(s: RipController.State, rip: RipController) {
                 (if (r.recoveredSectors > 0) " · 第 2 遍补读回 ${r.recoveredSectors} 扇区" else ""),
             style = MaterialTheme.typography.bodySmall,
         )
-        r.volume?.volumeId?.let { Text("卷标：$it", style = MaterialTheme.typography.bodySmall) }
+        (s.label ?: r.volume?.volumeId)?.let { Text("卷标：$it", style = MaterialTheme.typography.bodySmall) }
+        s.plan?.takeIf { it.trimmed }?.let { Text("可重写盘：只读了文件系统部分（整张盘 ${DiscInfo.formatBytes(it.capacitySectors * RipPlan.SECTOR)}）", style = MaterialTheme.typography.bodySmall) }
+        s.incidents.forEach { Text("· $it", style = MaterialTheme.typography.bodySmall, color = StatusColors.warn) }
         if (r.sha1 != null) {
             SelectionContainer {
                 Text("MD5 ${r.md5}\nSHA-1 ${r.sha1}\nCRC32 ${r.crc32}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)

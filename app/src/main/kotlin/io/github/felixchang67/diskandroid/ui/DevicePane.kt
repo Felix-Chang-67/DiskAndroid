@@ -91,8 +91,9 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onRefresh = { vm.refreshDrive(d.deviceName) },
                 discExtras = { session, disc ->
                     if (disc.hasAudio) CdPlayerSection(session, disc, vm.player, vm.metadata) { track -> vm.playTrack(d.deviceName, track) }
+                    if (vm.files.browsable(disc)) DiscFilesSection(session, disc, vm.files) { entries -> vm.startCopy(d.deviceName, entries) }
                     if (disc.dataTracks.isNotEmpty() || disc.family != io.github.felixchang67.diskandroid.core.mmc.MmcNames.DiscFamily.CD) {
-                        RipSection(session, disc, vm.rip) { options -> vm.startRip(d.deviceName, options) }
+                        RipSection(session, disc, vm.rip, vm.files) { options -> vm.startRip(d.deviceName, options) }
                     }
                 },
             )
@@ -117,14 +118,14 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：读成 ISO、自动播放", style = MaterialTheme.typography.titleMedium)
-            Text("1. 读成 ISO：放入数据盘（CD-ROM / CD-R、DVD、BD 都可以），在“读成 ISO”里先选保存文件夹，再点“开始读取”。可以中途取消，也可以试试读到一半弹盘。")
-            Text("2. 读完会在同一个文件夹生成 .iso、.log（报告，含 MD5 / SHA-1 / CRC32）和 .mapfile；有划痕的盘可以看坏扇区处理。")
-            Text("3. 自动播放：App 开着时放入音乐 CD，会出现“2 秒后播放”，可以取消或立即播放；开头 1 秒淡入。")
-            Text("4. 无缝播放（gapless）：一首播完直接接下一首；播放中按“下一首”、点曲目、拖进度条，声音都不中断。最好用首尾相连的 Live 专辑试。")
-            Text("5. 播放或读盘时如果光驱突然断开，会提示检查供电。测完点“导出日志（zip）”发给我。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：浏览盘上的文件", style = MaterialTheme.typography.titleMedium)
+            Text("1. 放入数据盘（DVD、BD、CD-ROM、自己刻的盘都可以）：“盘上的文件”会显示文件系统（UDF / ISO 9660 / Joliet）、卷标和盘片类型（DVD-Video、BDMV 等）。点文件夹进入，看日文文件名是否正常。")
+            Text("2. 选好保存位置后，可以“复制”单个文件、当前文件夹或整张盘的文件（有版权保护的盘不提供复制）。")
+            Text("3. 再把上次那张 DVD+RW 读成 ISO：文件名应该是正确的日文卷标，而且只读文件系统实际用到的部分（比上次快）；报告里会列出中途的复位。")
+            Text("4. 加强版 CD（带数据区段的音乐 CD）：点“查看数据区段里的文件”。也可以试试自己用 Windows 刻的盘（“类似于 USB 闪存驱动器”方式）。")
+            Text("5. 测完点“导出日志（zip）”发给我。")
             Text(
-                "发给光驱的仍只有白名单里的只读命令（本版新增读数据扇区的 READ(10)），不会写盘，也不会修改地区码。CSS 加密的 DVD 要到阶段 3 才能读成 ISO。",
+                "发给光驱的仍只有白名单里的只读命令，不会写盘，也不会修改地区码。CSS 加密的 DVD 要到阶段 3 才能读成 ISO；视频播放在 N2.2。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

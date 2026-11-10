@@ -250,6 +250,11 @@ class FakeMmc {
     /** 测试用：数据扇区 [lba] 的内容（LBA 16 是 ISO 9660 主卷描述符时放卷标和卷大小）。 */
     fun dataSector(d: FakeDisc, lba: Long): ByteArray {
         val b = ByteArray(2048)
+        d.image?.let { img ->
+            val from = lba * 2048
+            if (from < img.size) System.arraycopy(img, from.toInt(), b, 0, minOf(2048, img.size - from.toInt()))
+            return b
+        }
         if (lba == 16L && d.volumeId != null) {
             b[0] = 1
             "CD001".toByteArray(Charsets.US_ASCII).copyInto(b, 1)

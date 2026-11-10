@@ -32,6 +32,8 @@ class FakeDisc(
     val volumeId: String? = null,
     /** 这些 LBA 以前读不出、第 N 次（从 1 起）才读得出：模拟划痕盘重试后成功。 */
     val flakySectors: Map<Long, Int> = emptyMap(),
+    /** 数据扇区的内容取自这个镜像（超出部分为全零）；null 时用 [FakeMmc.dataSector] 的确定性内容。 */
+    val image: ByteArray? = null,
 ) {
     val sessions: List<Int> get() = tracks.map { it.session }.distinct().sorted()
 

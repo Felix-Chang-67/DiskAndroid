@@ -15,7 +15,7 @@ kotlin {
 }
 
 dependencies {
-    api(project(":core:drive"))
+    api(project(":core:fs"))
     testImplementation(project(":core:testing"))
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.kotlin.test)

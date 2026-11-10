@@ -1,5 +1,6 @@
 package io.github.felixchang67.diskandroid.core.rip
 
+import io.github.felixchang67.diskandroid.core.fs.DiscText
 import io.github.felixchang67.diskandroid.core.log.DiskLog
 import io.github.felixchang67.diskandroid.core.mmc.MmcCommands
 import io.github.felixchang67.diskandroid.core.mmc.MmcNames
@@ -27,7 +28,8 @@ class IsoVolume(val volumeId: String?, val volumeSpaceSize: Long?) {
         fun parse(sector: ByteArray): IsoVolume? {
             if (sector.size < 2048) return null
             if (sector[0].toInt() != 1 || String(sector, 1, 5, Charsets.US_ASCII) != "CD001") return null
-            val id = String(sector, 40, 32, Charsets.US_ASCII).trim().ifEmpty { null }
+            // 卷标按 UTF-8 / Shift-JIS 猜编码（N1.6 真机：UTF-8 日文卷标被当成 ASCII，变成 9 个下划线）
+            val id = DiscText.field(sector, 40, 32).ifEmpty { null }
             val size = (0 until 4).fold(0L) { acc, k -> acc or ((sector[80 + k].toLong() and 0xFF) shl (8 * k)) }
             return IsoVolume(id, size.takeIf { it > 0 })
         }
@@ -39,6 +41,8 @@ data class RipOptions(
     val blockSectors: Int = 32,
     /** 第 2 遍每个扇区最多读几次。 */
     val retries: Int = 3,
+    /** 可重写盘（DVD+RW、DVD-RW 限制性覆写、DVD-RAM、BD-RE）只读到文件系统结尾。 */
+    val trimRewritable: Boolean = true,
 )
 
 data class RipProgress(

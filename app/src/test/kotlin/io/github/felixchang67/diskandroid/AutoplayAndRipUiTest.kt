@@ -101,7 +101,7 @@ class AutoplayAndRipUiTest {
             idle()
             assertTrue(container.player.autoplay.value == null)
             val disc = session.disc.value!!
-            compose.setContent { RipSection(session, disc, container.rip) {} }
+            compose.setContent { RipSection(session, disc, container.rip, container.files) {} }
             compose.onNodeWithText("读成 ISO").assertExists()
             compose.onNodeWithText("选择文件夹").assertExists()
             compose.onNodeWithText("41.0 MB（20000 扇区）", substring = true).assertExists()

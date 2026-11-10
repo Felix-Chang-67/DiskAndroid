@@ -204,4 +204,73 @@ class RipTest {
         assertEquals(RipResult.Status.OUTPUT_ERROR, r.status)
         assertTrue(r.message!!.contains("File too large"))
     }
+
+    /** DVD+RW 上的小 ISO：PVD 卷标是 UTF-8 日文，卷大小 300 扇区；整张盘格式化成 2000 扇区。 */
+    private fun rewritableWithSmallIso(): Pair<FakeDisc, ByteArray> {
+        val img = ByteArray(300 * 2048)
+        for (lba in 0 until 300) for (i in 0 until 2048) img[lba * 2048 + i] = ((lba * 7 + i) and 0xFF).toByte()
+        val pvd = 16 * 2048
+        img.fill(0, pvd, pvd + 2048)
+        img[pvd] = 1
+        "CD001".toByteArray().copyInto(img, pvd + 1)
+        img[pvd + 6] = 1
+        img.fill(0x20, pvd + 40, pvd + 72)
+        "ライブ_LIVE".toByteArray(Charsets.UTF_8).copyInto(img, pvd + 40)
+        for (k in 0 until 4) {
+            img[pvd + 80 + k] = (300 ushr (8 * k)).toByte()
+            img[pvd + 87 - k] = (300 ushr (8 * k)).toByte()
+        }
+        img[pvd + 128] = 0x00
+        img[pvd + 129] = 0x08
+        // 根目录记录（34 字节，指向扇区 18）
+        img[pvd + 156] = 34
+        img[pvd + 156 + 2] = 18
+        img[pvd + 156 + 10] = 0x00
+        img[pvd + 156 + 11] = 0x08
+        img[pvd + 156 + 25] = 2
+        img[pvd + 156 + 32] = 1
+        val term = 17 * 2048
+        img.fill(0, term, term + 2048)
+        img[term] = 0xFF.toByte()
+        "CD001".toByteArray().copyInto(img, term + 1)
+        img[term + 6] = 1
+        img.fill(0, 18 * 2048, 19 * 2048)
+        val disc = FakeDisc(0x1A, listOf(FakeTrack(1, 1, 0, 2_000, audio = false)), 2_000, erasable = true, image = img)
+        return disc to img
+    }
+
+    @Test
+    fun rewritableDiscIsTrimmedToTheFileSystem() = runTest {
+        val (disc, img) = rewritableWithSmallIso()
+        val mmc = mmcWith(disc)
+        val (session, info) = readDisc(mmc)
+        assertEquals(2_000L, info.capacity?.blocks)
+
+        val src = io.github.felixchang67.diskandroid.core.fs.CachedSectorSource(
+            io.github.felixchang67.diskandroid.core.fs.ScsiSectorSource(session::read, info.capacity?.blocks, sleep = {}),
+        )
+        val vol = io.github.felixchang67.diskandroid.core.fs.DiscFs.probe(src)
+        assertEquals("ライブ_LIVE", vol.label)
+        val end = io.github.felixchang67.diskandroid.core.fs.DiscFs.volumeEnd(src, vol)
+        assertEquals(300L, end)
+
+        val plan = assertIs<RipPlan.Build.Ok>(RipPlan.from(info, end)).plan
+        assertEquals(300, plan.totalSectors)
+        assertTrue(plan.trimmed)
+        assertEquals(2_000, plan.capacitySectors)
+        assertTrue(plan.warnings.any { it.contains("可重写盘") }, plan.warnings.toString())
+        val out = MemoryOutput()
+        val r = RipEngine(session::read, out, log, RipOptions(blockSectors = 64), clock = { testScheduler.currentTime }, sleep = {}).run(plan, { false }) {}
+        assertEquals(RipResult.Status.COMPLETED, r.status)
+        assertContentEquals(img, out.data)
+        assertEquals(sha1(img), r.sha1)
+        assertEquals("ライブ_LIVE", r.volume?.volumeId)
+        val report = RipReport.text("test", "now", "drive", info, plan, RipOptions(), "x.iso", r, vol, listOf("15:30:24 光驱自行复位"))
+        assertTrue(report.contains("只读到文件系统结尾"), report)
+        assertTrue(report.contains("ISO 9660：卷标「ライブ_LIVE」（原始字节 E3 83 A9"), report)
+        assertTrue(report.contains("光驱自行复位"), report)
+
+        // 不是可重写盘（或者没给文件系统结尾）时照旧读整张盘
+        assertEquals(2_000, assertIs<RipPlan.Build.Ok>(RipPlan.from(info)).plan.totalSectors)
+    }
 }

@@ -12,10 +12,12 @@ import io.github.felixchang67.diskandroid.diag.ExitReasons
 import io.github.felixchang67.diskandroid.diag.PreviousSession
 import io.github.felixchang67.diskandroid.diag.SystemInfo
 import io.github.felixchang67.diskandroid.drive.DriveManager
+import io.github.felixchang67.diskandroid.files.DiscBrowser
 import io.github.felixchang67.diskandroid.log.LogcatSink
 import io.github.felixchang67.diskandroid.meta.MetadataManager
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
 import kotlinx.coroutines.flow.map
+import io.github.felixchang67.diskandroid.rip.OutputFolder
 import io.github.felixchang67.diskandroid.rip.RipController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +47,8 @@ class AppContainer(val app: Application) {
     val driveManager: DriveManager
     val player: CdPlaybackController
     val metadata: MetadataManager
+    val outputFolder: OutputFolder
+    val files: DiscBrowser
     val rip: RipController
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
@@ -61,7 +65,10 @@ class AppContainer(val app: Application) {
         driveManager = DriveManager(usbMonitor, usbConnector, log, mainScope)
         player = CdPlaybackController(app, log, mainScope)
         metadata = MetadataManager(app, log, mainScope)
-        rip = RipController(app, log, mainScope)
+        outputFolder = OutputFolder(app, log)
+        files = DiscBrowser(app, log, mainScope, outputFolder)
+        rip = RipController(app, log, mainScope, outputFolder, files)
+        files.otherJobRunning = { rip.running }
     }
 
     fun start() {
@@ -73,10 +80,11 @@ class AppContainer(val app: Application) {
         driveManager.start()
         metadata.start(driveManager.drives)
         player.titleResolver = { disc, n -> metadata.metadataFor(disc)?.track(n)?.title }
-        player.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible) { rip.running }
+        player.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible) { rip.running || files.copying }
         driveManager.busyDescriber = { session ->
             when {
                 rip.running && rip.state.value?.session === session -> "读盘"
+                files.copying && files.copy.value?.session === session -> "复制文件"
                 player.current.value?.session === session && player.state.value?.let { it.active && it.status != io.github.felixchang67.diskandroid.core.cdda.PlayerState.Status.PAUSED } == true -> "播放"
                 else -> null
             }

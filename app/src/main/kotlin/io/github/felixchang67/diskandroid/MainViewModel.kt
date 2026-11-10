@@ -36,6 +36,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val player = c.player
     val metadata = c.metadata
     val rip = c.rip
+    val files = c.files
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
@@ -91,7 +92,22 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
             _messages.tryEmit("正在读盘，读完（或取消）之后才能播放")
             return
         }
+        if (c.files.copying) {
+            _messages.tryEmit("正在从盘上复制文件，复制完（或取消）之后才能播放")
+            return
+        }
         c.player.play(drive.session, disc, track)
+    }
+
+    /** 把盘上的文件 / 文件夹复制到保存位置。 */
+    fun startCopy(deviceName: String, entries: List<io.github.felixchang67.diskandroid.core.fs.DiscEntry>) {
+        val drive = c.driveManager.drives.value[deviceName]
+        val disc = drive?.session?.disc?.value
+        if (drive == null || disc == null) {
+            _messages.tryEmit("光驱或盘片已经不在了")
+            return
+        }
+        c.files.startCopy(drive.session, disc, entries) { c.player.stop() }?.let { _messages.tryEmit(it) }
     }
 
     /** 把这台光驱当前的盘读成 ISO。 */
