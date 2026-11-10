@@ -42,15 +42,15 @@ genisoimage -quiet -input-charset utf-8 -udf -J -V "DVD_VIDEO_TEST" -o "$WORK/ud
 # C) UDF 2.60 + ISO 9660 + Joliet（pycdlib），UDF 里是日文文件名
 "$PY" "$HERE/make_udf260.py" "$WORK/udf260.iso"
 
-# D) UDF 2.50 + 元数据分区 + VAT（BD-R 增量刻录的结构；mkudffs 只能建空文件系统，2.50 只支持 BD-R / DVD-R）
-mkudffs --utf8 --media-type=bdr --udfrev=2.50 --blocksize=2048 --label="ブルーレイ_TEST" --new-file "$WORK/udf250_meta.img" 8192 >/dev/null
+# D) UDF 2.50 + VAT（BD-R 增量刻录的结构；mkudffs 只能建空文件系统，2.50 只支持 BD-R / DVD-R，而且不建元数据分区）
+mkudffs --utf8 --media-type=bdr --udfrev=2.50 --blocksize=2048 --label="ブルーレイ_TEST" --new-file "$WORK/udf250_bdr_vat.img" 8192 >/dev/null
 # E) UDF 2.01 + 备用（sparing）表（DVD-RW 包写入的结构）
 mkudffs --utf8 --media-type=dvdrw --udfrev=2.01 --blocksize=2048 --label="RW_SPARING" --new-file "$WORK/udf201_sparing.img" 8192 >/dev/null
 # F) UDF 2.01 + 虚拟分配表（VAT，CD-R 增量刻录的结构）
 mkudffs --utf8 --media-type=cdr --udfrev=2.01 --blocksize=2048 --label="CDR_VAT" --new-file "$WORK/udf201_vat.img" 4096 >/dev/null
 
 mkdir -p "$OUT"
-for f in joliet_rr.iso udf102_bridge.iso udf260.iso udf250_meta.img udf201_sparing.img udf201_vat.img; do
+for f in joliet_rr.iso udf102_bridge.iso udf260.iso udf250_bdr_vat.img udf201_sparing.img udf201_vat.img; do
   gzip -9n -c "$WORK/$f" > "$OUT/$f.gz"
   echo "$f: $(stat -c %s "$WORK/$f") 字节 → $(stat -c %s "$OUT/$f.gz")"
 done

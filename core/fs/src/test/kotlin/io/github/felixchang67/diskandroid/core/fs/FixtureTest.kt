@@ -133,7 +133,7 @@ class FixtureTest {
 
     @Test
     fun bdrWithVirtualAllocationTable() = runTest {
-        val img = image("udf250_meta.img")
+        val img = image("udf250_bdr_vat.img")
         val src = CachedSectorSource(ByteArraySectorSource(img))
         val last = img.size / SECTOR_SIZE - 1L
         val vol = DiscFs.probe(src, ProbeOptions(lastWritten = listOf(last)))
