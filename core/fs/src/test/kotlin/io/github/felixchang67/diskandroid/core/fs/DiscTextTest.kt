@@ -11,10 +11,49 @@ class DiscTextTest {
         assertEquals("DVD_VIDEO", DiscText.decode("DVD_VIDEO".toByteArray()))
         assertEquals("ライブ_LIVE", DiscText.decode("ライブ_LIVE".toByteArray(Charsets.UTF_8)))
         assertEquals("ライブ映像", DiscText.decode("ライブ映像".toByteArray(sjis)))
-        // GBK 文件名：Shift-JIS 严格解码失败时才轮到 GBK（两者都能解开时按日本盘优先用 Shift-JIS）
-        val gbk = "演唱会资料".toByteArray(charset("GBK"))
-        val decoded = DiscText.decode(gbk)
-        if (runCatching { charset("windows-31j").newDecoder().decode(java.nio.ByteBuffer.wrap(gbk)) }.isFailure) assertEquals("演唱会资料", decoded)
+        // 只有汉字的 GBK（没有 80h–9Fh 字节，也没有假名）：靠"像常用汉字"的得分认出来
+        assertEquals("演唱会资料", DiscText.decode("演唱会资料".toByteArray(charset("GBK"))))
+        // EUC-JP 的假名和 GBK 编码相同，结果一样
+        assertEquals("ライブ", DiscText.decode("ライブ".toByteArray(charset("EUC-JP"))))
+    }
+
+    /** N2.1 真机：DVDFab（中文 Windows）把卷标按 GBK 写进 ISO 9660 和 UDF。 */
+    @Test
+    fun gbkLabelsWrittenByDvdFab() {
+        val kana = byteArrayOf(0xA5.toByte(), 0xD2.toByte(), 0xA5.toByte(), 0xC8.toByte(), 0xA5.toByte(), 0xEA.toByte(), 0xA5.toByte(), 0xA8.toByte())
+        // ISO 9660 主卷描述符的 32 字节卷标（原始字节照抄日志）
+        val iso = kana + " LIVE AT LIQUIDROOM EXTR".toByteArray()
+        assertEquals(32, iso.size)
+        assertEquals("ヒトリエ LIVE AT LIQUIDROOM EXTR", DiscText.field(iso, 0, 32))
+        // UDF 逻辑卷标识：压缩 ID 8（按规范应是 Latin-1），实际放的是 GBK 字节。以前显示成「¥Ò¥È¥ê¥¨」
+        val lvid = ByteArray(128)
+        val body = byteArrayOf(8) + kana + " LIVE at LIQUIDROOM Extra Video".toByteArray()
+        body.copyInto(lvid)
+        lvid[127] = body.size.toByte()
+        assertEquals("ヒトリエ LIVE at LIQUIDROOM Extra Video", DiscText.dstring(lvid, 0, 128))
+        // 32 字节的 UDF 卷标识被截短
+        val vid = ByteArray(32)
+        body.copyInto(vid, 0, 0, 31)
+        vid[31] = 31
+        assertEquals("ヒトリエ LIVE at LIQUIDROOM Ex", DiscText.dstring(vid, 0, 32))
+    }
+
+    @Test
+    fun westernLatin1StaysLatin1() {
+        val cafe = "Café".toByteArray(Charsets.ISO_8859_1)
+        assertEquals("Café", DiscText.decode(cafe))
+        assertEquals("AÇÃO", DiscText.decode("AÇÃO".toByteArray(Charsets.ISO_8859_1)))
+        val udf = ByteArray(32)
+        val body = byteArrayOf(8) + "Música Café".toByteArray(Charsets.ISO_8859_1)
+        body.copyInto(udf)
+        udf[31] = body.size.toByte()
+        assertEquals("Música Café", DiscText.dstring(udf, 0, 32))
+        // Shift-JIS 放在 UDF 8 位字符串里（日本的 Windows 软件）
+        val sj = ByteArray(32)
+        val sjBody = byteArrayOf(8) + "ライブ映像".toByteArray(sjis)
+        sjBody.copyInto(sj)
+        sj[31] = sjBody.size.toByte()
+        assertEquals("ライブ映像", DiscText.dstring(sj, 0, 32))
     }
 
     @Test

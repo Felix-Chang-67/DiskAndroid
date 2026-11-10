@@ -224,8 +224,15 @@ class DiscBrowser(
         val fs = _states.value[session]?.info?.fs ?: return
         _states.update { m -> m[session]?.let { m + (session to it.copy(path = path, listing = true, listError = null)) } ?: m }
         scope.launch {
+            val t0 = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) { runCatching { fs.list(path.last()) } }
             result.onFailure { log.w(TAG, "列目录失败：${path.last().path}：${it.message}") }
+            result.onSuccess { list ->
+                log.i(
+                    TAG, "打开目录 ${path.last().path}",
+                    "文件夹" to list.count { it.isDirectory }, "文件" to list.count { !it.isDirectory }, "耗时ms" to System.currentTimeMillis() - t0,
+                )
+            }
             _states.update { m ->
                 val s = m[session]?.takeIf { it.fingerprint == fp && it.path == path } ?: return@update m
                 m + (session to s.copy(listing = false, entries = result.getOrNull() ?: s.entries, listError = result.exceptionOrNull()?.message))
@@ -264,7 +271,10 @@ class DiscBrowser(
         val state = _states.value[session] ?: return "盘上的文件还没读出来"
         val info = state.info ?: return "盘上的文件还没读出来"
         val fs = info.fs ?: return "这张盘的文件系统打不开"
-        copyRefusal(disc, info)?.let { return it }
+        copyRefusal(disc, info)?.let {
+            log.i(TAG, "不提供复制：$it")
+            return it
+        }
         if (entries.isEmpty()) return "没有要复制的东西"
         stopPlayback()
         cancelFlag = false
