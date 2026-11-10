@@ -77,6 +77,12 @@ class DriveManager(
     private val _connecting = MutableStateFlow<Set<String>>(emptySet())
     val connecting: StateFlow<Set<String>> = _connecting.asStateFlow()
 
+    /**
+     * 供电诊断用：光驱此刻在忙什么（"播放" / "读盘"），没在忙返回 null。由 AppContainer 设置。
+     * 忙的时候 USB 突然断开，多半是起转 / 寻道的电流峰值把供电拉垮了（风险 R1）。
+     */
+    var busyDescriber: ((DriveSession) -> String?)? = null
+
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
@@ -185,6 +191,17 @@ class DriveManager(
 
     private fun shutdown(deviceName: String, disconnected: Boolean, reason: String) {
         val drive = _drives.value[deviceName] ?: return
+        // 掉线分类（风险 R1）：在播放 / 读盘时、或者光驱正在起转时 USB 断开 → 疑似供电不足
+        val busy = if (disconnected) busyDescriber?.invoke(drive.session) else null
+        val spinningUp = disconnected && drive.session.media.value is io.github.felixchang67.diskandroid.core.drive.MediaStatus.BecomingReady
+        val powerSuspect = when {
+            busy != null -> "光驱在${busy}时断开"
+            spinningUp -> "光驱在起转（读取盘片）时断开"
+            else -> null
+        }
+        if (powerSuspect != null) {
+            log.w(TAG, "$powerSuspect：疑似供电不足", "提示" to DriveSession.POWER_HINT)
+        }
         _drives.update { it - deviceName }
         val summary = mutableListOf("会话结束 ${LogFormat.isoTime(System.currentTimeMillis())}（$reason）：${drive.displayName} ${drive.vidPid}")
         summary += "  BOT 统计：${drive.bot.stats}；${drive.bot.ioStats()}"
@@ -192,6 +209,8 @@ class DriveManager(
         _history.update { (it + listOf(summary)).takeLast(MAX_HISTORY) }
         drive.shutdown(disconnected)
         log.i(TAG, "光驱会话结束", "原因" to reason, "光驱" to drive.displayName)
-        if (disconnected) _messages.tryEmit("光驱已断开（${drive.vidPid}）")
+        if (disconnected) {
+            _messages.tryEmit(if (powerSuspect != null) "$powerSuspect。如果不是你拔的：${DriveSession.POWER_HINT}" else "光驱已断开（${drive.vidPid}）")
+        }
     }
 }

@@ -15,6 +15,14 @@ import androidx.core.content.edit
 import io.github.felixchang67.diskandroid.core.cdda.ByteOrderMode
 import io.github.felixchang67.diskandroid.core.cdda.CdAlbum
 import io.github.felixchang67.diskandroid.core.cdda.CdPlayerEngine
+import io.github.felixchang67.diskandroid.core.cdda.CdTrack
+import io.github.felixchang67.diskandroid.core.drive.MediaStatus
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import io.github.felixchang67.diskandroid.core.cdda.CddaReader
 import io.github.felixchang67.diskandroid.core.cdda.PlayerState
 import io.github.felixchang67.diskandroid.core.drive.DiscInfo
@@ -70,6 +78,18 @@ class CdPlaybackController(
     private val _current = MutableStateFlow<Current?>(null)
     val current: StateFlow<Current?> = _current.asStateFlow()
 
+    /** 曲名来源（在线识别结果），只用于日志和播放器内部；界面另行组合。 */
+    var titleResolver: ((DiscInfo, Int) -> String?)? = null
+
+    /** 等待自动播放的盘（显示"2 秒后播放"横幅）。 */
+    class AutoplayPending(val session: DriveSession, val disc: DiscInfo, val fingerprint: String, val startAtMs: Long)
+
+    private val _autoplayEnabled = MutableStateFlow(prefs.getBoolean("autoplay", true))
+    val autoplayEnabled: StateFlow<Boolean> = _autoplayEnabled.asStateFlow()
+    private val _autoplay = MutableStateFlow<AutoplayPending?>(null)
+    val autoplay: StateFlow<AutoplayPending?> = _autoplay.asStateFlow()
+    private var autoplayJob: Job? = null
+
     val state: StateFlow<PlayerState?> = _current
         .flatMapLatest { c -> c?.engine?.state ?: flowOf(null) }
         .stateIn(scope, SharingStarted.Eagerly, null)
@@ -101,26 +121,121 @@ class CdPlaybackController(
     // ---------------- 控制 ----------------
 
     /** 播放 [session] 当前盘片的第 [track] 轨（同一张盘复用现有播放器）。 */
-    fun play(session: DriveSession, disc: DiscInfo, track: Int, positionMs: Long = 0) {
+    fun play(session: DriveSession, disc: DiscInfo, track: Int, positionMs: Long = 0, fadeInMs: Int? = null) {
+        cancelAutoplay(log = false)
         val fingerprint = fingerprint(disc)
         val cur = _current.value
         if (cur != null && cur.session === session && cur.fingerprint == fingerprint) {
             requestFocus()
-            cur.engine.play(track, positionMs)
+            if (fadeInMs != null) cur.engine.play(track, positionMs, fadeInMs) else cur.engine.play(track, positionMs)
             return
         }
         cur?.let { release(it, "切换到另一张盘") }
-        val album = CdAlbum.from(disc) ?: run {
+        val base = CdAlbum.from(disc) ?: run {
             log.w(TAG, "这张盘没有可以播放的音轨")
             return
         }
+        // 日志里用在线识别出的曲名（识别结果晚到时仍是 CD-TEXT / Track N，不影响界面）
+        val album = titleResolver?.let { resolve ->
+            CdAlbum(
+                base.tracks.map { t -> CdTrack(t.number, t.startLba, t.sectors, t.preEmphasis, resolve(disc, t.number) ?: t.title, t.performer) },
+                base.title,
+                base.performer,
+            )
+        } ?: base
         val engine = createEngine(session, album)
         val c = Current(session, disc, album, engine, fingerprint)
         _current.value = c
         watch(c)
         requestFocus()
-        engine.play(track, positionMs)
+        if (fadeInMs != null) engine.play(track, positionMs, fadeInMs) else engine.play(track, positionMs)
         log.i(TAG, "音乐 CD 播放器已创建", "专辑" to (album.title ?: "（无 CD-TEXT）"), "音轨数" to album.tracks.size, "光驱" to session.label)
+    }
+
+    // ---------------- 自动播放 ----------------
+
+    fun setAutoplay(enabled: Boolean) {
+        _autoplayEnabled.value = enabled
+        prefs.edit { putBoolean("autoplay", enabled) }
+        if (!enabled) cancelAutoplay()
+        log.i(TAG, "放入音乐 CD 后自动播放：${if (enabled) "开" else "关"}")
+    }
+
+    /**
+     * 跟踪各光驱：会话开始之后"新放进去"的音乐 CD（经历过无盘 / 正在读取 → 就绪），在界面可见、没在播放、没在读盘时，
+     * 显示"2 秒后播放"，到时从第 1 首淡入播放。启动 App 时盘已经在里面不算。
+     */
+    fun watchForAutoplay(sessions: Flow<List<DriveSession>>, uiVisible: StateFlow<Boolean>, busy: () -> Boolean) {
+        scope.launch {
+            sessions.collectLatest { list ->
+                coroutineScope {
+                    list.forEach { session ->
+                        launch {
+                            var armed = false
+                            session.media.collect { m ->
+                                when (m) {
+                                    is MediaStatus.NoMedium, is MediaStatus.BecomingReady -> {
+                                        armed = true
+                                        if (_autoplay.value?.session === session) cancelAutoplay()
+                                    }
+                                    is MediaStatus.Ready -> if (armed) {
+                                        armed = false
+                                        val disc = withTimeoutOrNull(15_000) { session.disc.first { it != null } }
+                                        if (disc != null) maybeAutoplay(session, disc, uiVisible.value, busy())
+                                    }
+                                    else -> Unit
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun maybeAutoplay(session: DriveSession, disc: DiscInfo, visible: Boolean, busy: Boolean) {
+        val why = when {
+            !disc.hasAudio -> return
+            !_autoplayEnabled.value -> "自动播放已关闭"
+            !visible -> "App 不在前台"
+            busy -> "正在读盘"
+            state.value?.let { it.active && it.status != PlayerState.Status.PAUSED } == true -> "正在播放别的盘"
+            else -> null
+        }
+        if (why != null) {
+            log.i(TAG, "放入了音乐 CD，但不自动播放：$why")
+            return
+        }
+        val pending = AutoplayPending(session, disc, fingerprint(disc), System.currentTimeMillis() + AUTOPLAY_DELAY_MS)
+        _autoplay.value = pending
+        log.i(TAG, "放入了音乐 CD：${AUTOPLAY_DELAY_MS / 1000} 秒后自动播放")
+        autoplayJob?.cancel()
+        autoplayJob = scope.launch {
+            delay(AUTOPLAY_DELAY_MS)
+            if (_autoplay.value === pending) startAutoplay(pending)
+        }
+    }
+
+    /** 横幅上的"立即播放"。 */
+    fun autoplayNow() {
+        _autoplay.value?.let { startAutoplay(it) }
+    }
+
+    fun cancelAutoplay(log: Boolean = true) {
+        if (_autoplay.value == null) return
+        autoplayJob?.cancel()
+        autoplayJob = null
+        _autoplay.value = null
+        if (log) this.log.i(TAG, "已取消自动播放")
+    }
+
+    private fun startAutoplay(p: AutoplayPending) {
+        autoplayJob?.cancel()
+        _autoplay.value = null
+        if (p.session.disc.value?.let { fingerprint(it) } != p.fingerprint) return
+        val first = CdAlbum.from(p.disc)?.first?.number ?: return
+        log.i(TAG, "自动播放第 $first 轨（1 秒淡入）")
+        play(p.session, p.disc, first, 0, CdPlayerEngine.AUTOPLAY_FADE_MS)
     }
 
     fun togglePause() {
@@ -302,6 +417,7 @@ class CdPlaybackController(
 
     companion object {
         const val TAG = "PLAYER"
+        const val AUTOPLAY_DELAY_MS = 2_000L
 
         /** 唤醒锁兜底超时：一张 CD 最长约 80 分钟，按 3 小时算，播放中会不断续期（每次状态变化重新 acquire）。 */
         private const val WAKELOCK_TIMEOUT_MS = 3 * 60 * 60 * 1000L

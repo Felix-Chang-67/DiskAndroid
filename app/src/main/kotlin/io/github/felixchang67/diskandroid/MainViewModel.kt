@@ -35,6 +35,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val connecting: StateFlow<Set<String>> = c.driveManager.connecting
     val player = c.player
     val metadata = c.metadata
+    val rip = c.rip
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
@@ -86,7 +87,23 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
             _messages.tryEmit("光驱或盘片已经不在了")
             return
         }
+        if (c.rip.running) {
+            _messages.tryEmit("正在读盘，读完（或取消）之后才能播放")
+            return
+        }
         c.player.play(drive.session, disc, track)
+    }
+
+    /** 把这台光驱当前的盘读成 ISO。 */
+    fun startRip(deviceName: String, options: io.github.felixchang67.diskandroid.core.rip.RipOptions) {
+        val drive = c.driveManager.drives.value[deviceName]
+        val disc = drive?.session?.disc?.value
+        if (drive == null || disc == null) {
+            _messages.tryEmit("光驱或盘片已经不在了")
+            return
+        }
+        val fingerprint = io.github.felixchang67.diskandroid.player.CdPlaybackController.fingerprint(disc)
+        c.rip.start(drive.session, disc, fingerprint, options) { c.player.stop() }?.let { _messages.tryEmit(it) }
     }
 
     fun logSnapshot(): List<LogRecord> = c.ring.snapshot()

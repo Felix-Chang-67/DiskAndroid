@@ -26,7 +26,8 @@ class CdPlayerEngineTest {
 
     private class Rig(val mmc: FakeMmc, val engine: CdPlayerEngine, val output: FakeAudioOutput, val album: CdAlbum)
 
-    private fun TestScope.rig(disc: FakeDisc, options: CdPlayerEngine.Options = CdPlayerEngine.Options(), configure: FakeMmc.() -> Unit = {}): Rig {
+    /** 默认关掉起播淡入，输出才能与盘上数据逐字节比对（淡入另有专门的测试）。 */
+    private fun TestScope.rig(disc: FakeDisc, options: CdPlayerEngine.Options = CdPlayerEngine.Options(shortFadeMs = 0), configure: FakeMmc.() -> Unit = {}): Rig {
         val mmc = FakeMmc().apply {
             insertDisc(disc, spinUpPolls = 0)
             pendingUnitAttention.clear()
@@ -133,6 +134,10 @@ class CdPlayerEngineTest {
         assertEquals(3, s.badSectors)
         val expected = r.mmc.expectedAudio(0, 225)
         expected.fill(0, 100 * SECTOR_BYTES, 103 * SECTOR_BYTES)
+        // 静音段前后各 5 ms 淡出 / 淡入（只在坏扇区所在的那一块 96–119 里做）
+        val chunk = expected.copyOfRange(96 * SECTOR_BYTES, 120 * SECTOR_BYTES)
+        PcmGain.fadeAroundSilence(chunk, 96, listOf(100L, 101L, 102L))
+        chunk.copyInto(expected, 96 * SECTOR_BYTES)
         assertContentEquals(expected, r.output.all.toByteArray())
         assertTrue(ring.snapshot().any { it.message.contains("已静音") })
     }
@@ -217,4 +222,23 @@ class CdPlayerEngineTest {
         assertTrue(result is io.github.felixchang67.diskandroid.core.scsi.ScsiResult.Good, result.toString())
         assertContentEquals(mmc.expectedAudio(0, 2), buf)
     }
+
+    @Test
+    fun autoplayFadesInOverOneSecond() = runTest {
+        val r = rig(FakeDisc.audioCd(trackCount = 1, secondsPerTrack = 3))
+        r.engine.play(trackNumber = 1, fadeInMs = CdPlayerEngine.AUTOPLAY_FADE_MS)
+        runCurrent()
+        advanceTimeBy(4_000)
+        runCurrent()
+        val out = r.output.all.toByteArray()
+        val ref = r.mmc.expectedAudio(0, 225)
+        fun sample(b: ByteArray, frame: Int) = (b[frame * 4 + 1].toInt() shl 8) or (b[frame * 4].toInt() and 0xFF)
+        // 第一帧增益为 0，半秒处约一半，一秒以后与原始数据完全相同
+        assertEquals(0, sample(out, 0))
+        val half = 22_050
+        val expectedHalf = sample(ref, half) * 0.5
+        assertTrue(kotlin.math.abs(sample(out, half) - expectedHalf) <= 2, "${sample(out, half)} vs $expectedHalf")
+        assertContentEquals(ref.copyOfRange(44_100 * 4, ref.size), out.copyOfRange(44_100 * 4, out.size))
+    }
 }
+

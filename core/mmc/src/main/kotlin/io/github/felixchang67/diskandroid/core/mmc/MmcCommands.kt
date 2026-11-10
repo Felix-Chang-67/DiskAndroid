@@ -209,6 +209,23 @@ object MmcCommands {
     }
 
     /**
+     * READ(10)（28h）读 2048 字节的数据扇区（CD Mode 1 / Mode 2 Form 1 的用户数据、DVD、BD），读进调用方的缓冲区。
+     * CDB 与 Linux sr.c 一致：字节 2–5 = 起始 LBA（大端），字节 7–8 = 块数（大端），其余为 0（不设 DPO / FUA）。
+     */
+    fun read10(lba: Long, blocks: Int, buffer: ByteArray, offset: Int, timeoutMs: Int = 20_000): ScsiCommand {
+        require(blocks in 1..0xFFFF && lba >= 0)
+        val cdb = ByteArray(10)
+        cdb[0] = 0x28
+        putBe32(cdb, 2, lba)
+        cdb[7] = (blocks shr 8).toByte()
+        cdb[8] = blocks.toByte()
+        return ScsiCommand.streamIn(cdb, buffer, offset, blocks * DATA_SECTOR_SIZE, "READ(10)", timeoutMs)
+    }
+
+    /** 数据扇区大小。 */
+    const val DATA_SECTOR_SIZE = 2048
+
+    /**
      * READ SUB-CHANNEL（42h）格式 02h：媒体目录号 MCN（即商品条码 UPC / EAN / JAN）。
      * CDB 与 Linux sr_get_mcn、libcdio mmc_read_subchannel 一致：字节 2 = 40h（SubQ，要子通道数据），
      * 字节 3 = 02h，分配长度 24（4 字节头 + 20 字节数据，libcdio 注明 MMC-4 表 424 / 431 / 432）。

@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -78,6 +79,8 @@ fun CdPlayerSection(
     val state by remember(session, disc) { player.stateFor(session, disc) }.collectAsStateWithLifecycle(null)
     val byteOrder by player.byteOrder.collectAsStateWithLifecycle()
     val deemphasis by player.deemphasis.collectAsStateWithLifecycle()
+    val autoplayEnabled by player.autoplayEnabled.collectAsStateWithLifecycle()
+    val autoplay by player.autoplay.collectAsStateWithLifecycle()
     LaunchedEffect(md?.coverUrl) { md?.coverUrl?.let { meta.requestCover(it) } }
 
     // 日文内容按日语区域选字形（系统是中文时，汉字默认会用简体中文字形，如"直""骨"的写法不同）
@@ -94,6 +97,9 @@ fun CdPlayerSection(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text("音乐 CD", style = MaterialTheme.typography.labelLarge)
+        autoplay?.takeIf { it.session === session }?.let { pending ->
+            AutoplayBanner(pending.startAtMs, TrackNames.album(disc, md), textLocale, onCancel = { player.cancelAutoplay() }, onNow = { player.autoplayNow() })
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             md?.coverUrl?.let { covers[it] }?.let { bmp ->
                 Image(
@@ -133,6 +139,10 @@ fun CdPlayerSection(
 
         Text("播放设置", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 6.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Switch(checked = autoplayEnabled, onCheckedChange = { player.setAutoplay(it) })
+            Text("放入音乐 CD 后自动播放（2 秒后开始，可取消）", style = MaterialTheme.typography.bodySmall)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Switch(checked = online, onCheckedChange = { meta.setOnline(it) })
             Text(
                 "联网识别曲名、封面和歌词（MusicBrainz、网易云音乐；只发送光盘目录、条码和搜索词）",
@@ -149,6 +159,35 @@ fun CdPlayerSection(
             Switch(checked = deemphasis, onCheckedChange = { player.setDeemphasis(it) })
             Text("去加重（只作用于标有“预加重”的音轨，早期日本 CD 常见）", style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+/** "2 秒后播放"横幅：倒计时、取消、立即播放。 */
+@Composable
+private fun AutoplayBanner(startAtMs: Long, album: String?, textLocale: LocaleList?, onCancel: () -> Unit, onNow: () -> Unit) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(startAtMs) {
+        while (true) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(100)
+        }
+    }
+    val left = ((startAtMs - now).coerceAtLeast(0) + 999) / 1000
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "$left 秒后播放" + (album?.let { "「$it」" } ?: ""),
+            style = MaterialTheme.typography.bodyMedium.locale(textLocale),
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onCancel) { Text("取消") }
+        FilledTonalButton(onClick = onNow) { Text("立即播放") }
     }
 }
 

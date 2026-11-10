@@ -15,6 +15,8 @@ import io.github.felixchang67.diskandroid.drive.DriveManager
 import io.github.felixchang67.diskandroid.log.LogcatSink
 import io.github.felixchang67.diskandroid.meta.MetadataManager
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
+import kotlinx.coroutines.flow.map
+import io.github.felixchang67.diskandroid.rip.RipController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +34,9 @@ class AppContainer(val app: Application) {
     val ring = RingBufferSink(capacity = 8000) { it.tag != LoggingScsiTransport.STREAM_TAG }
     val fileSink = FileLogSink(logDir, sessionId)
 
+    /** 界面是否在前台（自动播放只在看得见界面时进行）。MainActivity 的 onStart / onStop 更新。 */
+    val uiVisible = kotlinx.coroutines.flow.MutableStateFlow(false)
+
     /** 主线程作用域：光驱会话管理的状态都在这里修改。 */
     val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -40,6 +45,7 @@ class AppContainer(val app: Application) {
     val driveManager: DriveManager
     val player: CdPlaybackController
     val metadata: MetadataManager
+    val rip: RipController
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
     var previousSessionIssues: PreviousSession.Issues? = null
@@ -55,6 +61,7 @@ class AppContainer(val app: Application) {
         driveManager = DriveManager(usbMonitor, usbConnector, log, mainScope)
         player = CdPlaybackController(app, log, mainScope)
         metadata = MetadataManager(app, log, mainScope)
+        rip = RipController(app, log, mainScope)
     }
 
     fun start() {
@@ -65,6 +72,15 @@ class AppContainer(val app: Application) {
         usbMonitor.start()
         driveManager.start()
         metadata.start(driveManager.drives)
+        player.titleResolver = { disc, n -> metadata.metadataFor(disc)?.track(n)?.title }
+        player.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible) { rip.running }
+        driveManager.busyDescriber = { session ->
+            when {
+                rip.running && rip.state.value?.session === session -> "读盘"
+                player.current.value?.session === session && player.state.value?.let { it.active && it.status != io.github.felixchang67.diskandroid.core.cdda.PlayerState.Status.PAUSED } == true -> "播放"
+                else -> null
+            }
+        }
     }
 
     /** 未捕获异常先写进日志并同步落盘，再交给系统默认处理（弹"已停止运行"）。 */

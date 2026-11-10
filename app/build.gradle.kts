@@ -23,12 +23,12 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // 每个测试节点递增 versionCode，保证可以直接覆盖安装。
-        versionCode = 5
-        versionName = "0.5.0-N1.5b"
+        versionCode = 6
+        versionName = "0.6.0-N1.6"
 
         buildConfigField("String", "GIT_SHA", "\"$gitSha${if (gitDirty) "+dirty" else ""}\"")
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
-        buildConfigField("String", "TEST_NODE", "\"N1.5b\"")
+        buildConfigField("String", "TEST_NODE", "\"N1.6\"")
 
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -87,6 +87,7 @@ dependencies {
     implementation(project(":core:drive"))
     implementation(project(":core:cdda"))
     implementation(project(":core:meta"))
+    implementation(project(":core:rip"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

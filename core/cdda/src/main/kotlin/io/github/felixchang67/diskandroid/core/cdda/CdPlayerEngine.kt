@@ -98,6 +98,8 @@ class CdPlayerEngine(
         val deemphasis: Boolean = true,
         /** 播放时的读取速度（kB/s），null 表示不调整。 */
         val speedKBps: Int? = 706,
+        /** 手动点歌、跳转、换轨时的淡入毫秒数（防止爆音；测试里设 0 以便逐字节比对）。 */
+        val shortFadeMs: Int = SHORT_FADE_MS,
     )
 
     private val scope = CoroutineScope(SupervisorJob(parentScope.coroutineContext[Job]) + dispatcher + CoroutineName("cd-player"))
@@ -135,13 +137,16 @@ class CdPlayerEngine(
 
     // ---------------- 控制 ----------------
 
-    /** 从第 [trackNumber] 轨的 [positionMs] 处开始播放（默认当前轨 / 第一轨）。 */
-    fun play(trackNumber: Int? = null, positionMs: Long = 0) = post {
+    /**
+     * 从第 [trackNumber] 轨的 [positionMs] 处开始播放（默认当前轨 / 第一轨）。
+     * [fadeInMs]：开头的淡入时长（自动播放用 1 秒；手动点歌、跳转用很短的淡入防止爆音）。
+     */
+    fun play(trackNumber: Int? = null, positionMs: Long = 0, fadeInMs: Int = options.shortFadeMs) = post {
         val t = trackNumber?.let { album.track(it) }
             ?: currentTrack()?.takeIf { status != PlayerState.Status.ENDED }
             ?: album.first
         paused = false
-        startAt(t, lbaFor(t, positionMs))
+        startAt(t, lbaFor(t, positionMs), fadeInMs)
     }
 
     fun pause() = post {
@@ -223,7 +228,7 @@ class CdPlayerEngine(
 
     // ---------------- 流水线 ----------------
 
-    private suspend fun startAt(track: CdTrack, lba: Long) {
+    private suspend fun startAt(track: CdTrack, lba: Long, fadeInMs: Int = options.shortFadeMs) {
         cancelPipeline()
         if (!speedApplied && options.speedKBps != null) {
             speedApplied = true
@@ -237,7 +242,7 @@ class CdPlayerEngine(
         log.i(TAG, "开始播放第 ${track.number} 轨「${track.title}」", "位置" to formatMs((lba - track.startLba) * 1000 / SECTORS_PER_SECOND), "LBA" to lba)
         lastLoggedTrack = track
         val channel = Channel<Chunk>(options.bufferChunks)
-        producer = scope.launch { produce(gen, track, lba, channel) }
+        producer = scope.launch { produce(gen, track, lba, channel, fadeInMs * 44_100 / 1000) }
         writer = scope.launch { consume(gen, channel) }
         if (!paused) output.play()
         if (ticker == null) ticker = scope.launch { tick() }
@@ -276,10 +281,11 @@ class CdPlayerEngine(
         runCatching { reader.setSpeed(0xFFFF) }
     }
 
-    private suspend fun produce(gen: Int, startTrack: CdTrack, startLba: Long, ch: SendChannel<Chunk>) {
+    private suspend fun produce(gen: Int, startTrack: CdTrack, startLba: Long, ch: SendChannel<Chunk>, fadeFrames: Int) {
         var track: CdTrack? = startTrack
         var lba = startLba
         val deemph = Deemphasis()
+        var faded = 0
         try {
             while (track != null) {
                 val t: CdTrack = track
@@ -289,10 +295,12 @@ class CdPlayerEngine(
                     val buf = ByteArray(count * SECTOR_BYTES)
                     val r = reader.read(lba, count, buf)
                     coroutineContext.ensureActive()
+                    var silenced: List<Long> = emptyList()
                     when (r) {
                         CddaReader.Result.Ok -> Unit
                         is CddaReader.Result.Partial -> {
                             badSectors += r.bad.size
+                            silenced = r.bad
                             log.w(TAG, "第 ${t.number} 轨 ${formatMs((r.bad.first() - t.startLba) * 1000 / SECTORS_PER_SECOND)} 附近 ${r.bad.size} 个扇区读不出来，已静音", "范围" to CddaReader.ranges(r.bad))
                         }
                         is CddaReader.Result.Stop -> {
@@ -302,6 +310,14 @@ class CdPlayerEngine(
                         }
                     }
                     process(buf, t, deemph)
+                    if (silenced.isNotEmpty()) PcmGain.fadeAroundSilence(buf, lba, silenced)
+                    if (faded < fadeFrames) {
+                        // 起播淡入：增益从 faded/fadeFrames 线性升到 1
+                        val frames = buf.size / BYTES_PER_FRAME
+                        val n = minOf(frames, fadeFrames - faded)
+                        PcmGain.ramp(buf, 0, n, faded.toDouble() / fadeFrames, (faded + n).toDouble() / fadeFrames)
+                        faded += n
+                    }
                     ch.send(Chunk(lba, t, buf))
                     lba += count
                 }
@@ -440,5 +456,11 @@ class CdPlayerEngine(
         private const val PAUSED_POLL_MS = 50L
         private const val END_POLL_MS = 50L
         private const val TICK_MS = 250L
+
+        /** 手动点歌、跳转、换轨时的淡入（防止爆音）。 */
+        const val SHORT_FADE_MS = 30
+
+        /** 自动播放的淡入。 */
+        const val AUTOPLAY_FADE_MS = 1_000
     }
 }

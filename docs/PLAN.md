@@ -566,7 +566,8 @@ N4.x + N1.5 → N5.1 / N5.2
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
 | 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
 | 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | ✅ 真机通过（见 7.5） |
-| 2026-11-10 | N1.5b | 0.5.0-N1.5b（versionCode 5） | 修 N1.5 真机发现的读盘卡顿（批量传输按 16 KB 分块、JNI 直接取 errno、ENOMEM 原地重试、非 STALL 错误直接复位而不是误读 CSW；复位后重读整块而不是静音；播放缓冲加到约 10 秒）；在线识别：MusicBrainz 光盘 ID（与 libdiscid 测试向量一致）/ TOC 模糊匹配 / 盘上条码（READ SUB-CHANNEL MCN），网易云音乐补中文译名、歌曲 ID、封面，歌词取网易云（含中文翻译）、LRCLIB 备选；候选切换与手动搜索；本机缓存；通知栏 / 锁屏显示在线曲名与封面 | 等待真机测试 |
+| 2026-11-10 | N1.4 + N1.6 | 0.6.0-N1.6（versionCode 6） | 读成 ISO：READ(10)（对照 Linux sr.c）；镜像覆盖 LBA 0 到 READ CAPACITY，音轨 / 轨道与区段之间的空隙补零；两遍读取（第 1 遍大块、遇错跳过，第 2 遍逐扇区重试，补读回来的写回原位）；CD 轨道末尾读不出的 2 个 run-out 扇区算间隙；输出 .iso + .log 报告（含 ISO 9660 卷标 / 卷大小核对、MD5 / SHA-1 / CRC32）+ ddrescue 格式 .mapfile；SAF 选目录并持久授权、检查剩余空间、4 GB 写入失败提示 FAT32；前台服务 connectedDevice + 唤醒锁、通知栏进度与取消；取消 / 取盘 / 断开时保留已读部分并在 mapfile 标出；CSS 加密 DVD 拒绝并说明（需阶段 3 认证），意外遇到 05/6F 立即停止；读盘与播放互斥。整合：新放入的音乐 CD 显示"2 秒后播放"（取消 / 立即播放，可关闭），自动播放 1 秒淡入、手动点歌 30 ms 淡入；读不出的扇区静音前后各 5 ms 淡出 / 淡入；播放、读盘或起转时 USB 断开提示检查供电；日志补充识别结果、歌词、封面 | 等待真机测试 |
+| 2026-11-10 | N1.5b | 0.5.0-N1.5b（versionCode 5） | 修 N1.5 真机发现的读盘卡顿（批量传输按 16 KB 分块、JNI 直接取 errno、ENOMEM 原地重试、非 STALL 错误直接复位而不是误读 CSW；复位后重读整块而不是静音；播放缓冲加到约 10 秒）；在线识别：MusicBrainz 光盘 ID（与 libdiscid 测试向量一致）/ TOC 模糊匹配 / 盘上条码（READ SUB-CHANNEL MCN），网易云音乐补中文译名、歌曲 ID、封面，歌词取网易云（含中文翻译）、LRCLIB 备选；候选切换与手动搜索；本机缓存；通知栏 / 锁屏显示在线曲名与封面 | ✅ 真机通过（见 7.9） |
 | 2026-11-09 | N1.5（提前） | 0.4.0-N1.5（versionCode 4） | 音乐 CD 播放：READ CD（CD-DA，2352 字节/扇区）按块读取，整块重试 → 逐扇区重试 → 读不出的扇区静音并记录，每块 6 秒时间预算（划伤盘不卡死）；盘被取出 / 光驱断开立即停止；导入区 CD-TEXT（READ TOC 格式 5）：CRC 校验、双字节、TAB 省略、多语言块，**日文块优先，MS-JIS 用 windows-31j 解码，字符集标错的日本盘自动按 Shift-JIS 回退**；字节序自动检测（思路同 cdparanoia）+ 手动切换；预加重音轨做 50/15 µs 去加重（SoX deemph 参数，按定义逐点验证误差 < 0.07 dB）；播放时 SET CD SPEED 降到约 4 倍速，停止后恢复；AudioTrack 非阻塞输出、约 4 秒缓冲、跨轨无缝；上一首 / 下一首 / 暂停 / 拖动；音频焦点、拔耳机暂停、唤醒锁；前台服务 + MediaSession（通知栏 / 锁屏 / 蓝牙按键）。顺带修 N1.3：分配长度 4 字节对齐、完整 TOC 逐条校验、音乐 CD 显示时长、解出桥接芯片里的机芯型号 | ✅ 真机能播放（见 7.7，发现读盘卡顿，N1.5b 已修） |
 
 ### 7.3 N1.1 真机结果（2026-11-09）
@@ -651,3 +652,11 @@ N4.x + N1.5 → N5.1 / N5.2
 - MusicBrainz：每秒最多一个请求；User-Agent 写应用名、版本和项目地址，不含个人信息。
 - 网易云的旧搜索接口 `/api/search/get/web` 现在返回加密结果，改用 `/api/cloudsearch/pc`。这些是非官方接口，网易云改版时可能需要跟着调整，所以都集中在 `core:meta` 的 `NetEaseClient` 里。
 - 识别结果、歌词（包括"没有歌词"）、封面都缓存在本机；可以在播放设置里关闭联网。
+
+### 7.9 N1.5b 真机结果（2026-11-10，会话 session-20261110-021351）
+
+- **读盘卡顿已解决**：播放约 4 分钟（含多次拖动、换轨）共 1022 条 READ CD，**STALL 0、超时 0、I/O 错误 0、复位 0、重试 0、静音扇区 0**；传输方式为 usbfs ioctl、每次 ≤ 16 KB，ENOMEM 重试 0 次。上一版同样时长约 600 条里失败 10 次——分块传输后问题消失，与"大块传输在内核分配连续内存失败"的判断一致。
+- 在线识别：这次是 ヒトリエ 的单曲《センスレス・ワンダー》（通常盤，3 首）。MusicBrainz 光盘 ID 精确匹配，网易云 3/3 时长吻合，补了中文译名与歌词来源；整个识别约 3 秒。
+- 弹盘后播放器立即释放（"释放播放器：盘片已取出"），没有警告或错误。
+- 日志里看不到歌词、封面是否成功（只记了失败）：0.6.0 起成功也会记一行。
+

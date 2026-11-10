@@ -157,3 +157,49 @@ class Deemphasis {
         }
     }
 }
+
+/** 音量渐变（16 位立体声小端 PCM，原地处理）。 */
+object PcmGain {
+    /** 5 ms：读不出的扇区静音前后的淡出 / 淡入长度，避免爆音。 */
+    const val SILENCE_FADE_FRAMES = 220
+
+    /** 把从第 [fromFrame] 帧开始的 [frames] 帧乘上从 [g0] 线性变到 [g1] 的增益。超出缓冲区的部分忽略。 */
+    fun ramp(pcm: ByteArray, fromFrame: Int, frames: Int, g0: Double, g1: Double) {
+        if (frames <= 0) return
+        for (f in 0 until frames) {
+            val base = (fromFrame + f) * BYTES_PER_FRAME
+            if (base < 0 || base + 3 >= pcm.size) continue
+            val g = g0 + (g1 - g0) * f / frames
+            for (c in 0 until 2) {
+                val i = base + c * 2
+                val v = (pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)
+                val o = Math.round(v * g).toInt().coerceIn(-32768, 32767)
+                pcm[i] = o.toByte()
+                pcm[i + 1] = (o shr 8).toByte()
+            }
+        }
+    }
+
+    /**
+     * 读不出的扇区已经是 0：在每段静音前淡出、后淡入（各 [fadeFrames] 帧），只处理这一块缓冲区内的部分。
+     * @param chunkLba 这块缓冲区第一个扇区的 LBA。
+     */
+    fun fadeAroundSilence(pcm: ByteArray, chunkLba: Long, bad: List<Long>, fadeFrames: Int = SILENCE_FADE_FRAMES) {
+        val frames = pcm.size / BYTES_PER_FRAME
+        val sectors = frames / FRAMES_PER_SECTOR
+        val inChunk = bad.filter { it >= chunkLba && it < chunkLba + sectors }.sorted()
+        var i = 0
+        while (i < inChunk.size) {
+            var j = i
+            while (j + 1 < inChunk.size && inChunk[j + 1] == inChunk[j] + 1) j++
+            val silenceStart = ((inChunk[i] - chunkLba) * FRAMES_PER_SECTOR).toInt()
+            val silenceEnd = ((inChunk[j] - chunkLba + 1) * FRAMES_PER_SECTOR).toInt()
+            val before = minOf(fadeFrames, silenceStart)
+            ramp(pcm, silenceStart - before, before, 1.0, 0.0)
+            val after = minOf(fadeFrames, frames - silenceEnd)
+            ramp(pcm, silenceEnd, after, 0.0, 1.0)
+            i = j + 1
+        }
+    }
+}
+

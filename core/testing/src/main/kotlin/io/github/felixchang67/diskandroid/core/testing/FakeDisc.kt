@@ -28,6 +28,10 @@ class FakeDisc(
     val badSectors: Set<Long> = emptySet(),
     /** 子通道里的 MCN（JAN 条码），null 表示盘上没有。 */
     val mcn: String? = null,
+    /** 数据盘 LBA 16 处 ISO 9660 主卷描述符里的卷标，null 表示不放 PVD。 */
+    val volumeId: String? = null,
+    /** 这些 LBA 以前读不出、第 N 次（从 1 起）才读得出：模拟划痕盘重试后成功。 */
+    val flakySectors: Map<Long, Int> = emptyMap(),
 ) {
     val sessions: List<Int> get() = tracks.map { it.session }.distinct().sorted()
 
@@ -59,7 +63,8 @@ class FakeDisc(
             return FakeDisc(0x0008, listOf(t1, t2, t3), dataStart + 30_000)
         }
 
-        fun cdRom(sectors: Long = 300_000) = FakeDisc(0x0008, listOf(FakeTrack(1, 1, 0, sectors, audio = false)), sectors)
+        fun cdRom(sectors: Long = 300_000, volumeId: String? = null, badSectors: Set<Long> = emptySet(), flakySectors: Map<Long, Int> = emptyMap()) =
+            FakeDisc(0x0008, listOf(FakeTrack(1, 1, 0, sectors, audio = false)), sectors, volumeId = volumeId, badSectors = badSectors, flakySectors = flakySectors)
 
         fun dvdVideo(sectors: Long = 2_295_104, regionMask: Int = 0xFD, css: Boolean = true) =
             FakeDisc(0x0010, listOf(FakeTrack(1, 1, 0, sectors, audio = false)), sectors, dvdProtection = if (css) 1 else 0, dvdRegionMask = regionMask, readSpeedKBps = 11_080)

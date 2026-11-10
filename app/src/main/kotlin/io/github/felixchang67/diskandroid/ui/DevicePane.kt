@@ -91,6 +91,9 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onRefresh = { vm.refreshDrive(d.deviceName) },
                 discExtras = { session, disc ->
                     if (disc.hasAudio) CdPlayerSection(session, disc, vm.player, vm.metadata) { track -> vm.playTrack(d.deviceName, track) }
+                    if (disc.dataTracks.isNotEmpty() || disc.family != io.github.felixchang67.diskandroid.core.mmc.MmcNames.DiscFamily.CD) {
+                        RipSection(session, disc, vm.rip) { options -> vm.startRip(d.deviceName, options) }
+                    }
                 },
             )
         }
@@ -114,14 +117,13 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：在线识别曲名、封面与歌词", style = MaterialTheme.typography.titleMedium)
-            Text("1. 放入没有 CD-TEXT 的日本 CD。就绪后几秒内，“音乐 CD”卡片会显示专辑名、日文曲名（下一行是网易云的中文译名）和封面。")
-            Text("2. 播放时，播放条下方显示同步歌词（日文 + 中文翻译），会跟着播放进度走。")
-            Text("3. 识别错了或没识别出来：点“结果不对？ / 手动识别”，从候选里选，或输入专辑名、艺人搜索。")
-            Text("4. 上一版播放时偶尔卡住 6 秒、静音一小段的问题已修，请连续播放一整张专辑看看还有没有。")
-            Text("5. 测完点“导出日志（zip）”发给我。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：读成 ISO、自动播放", style = MaterialTheme.typography.titleMedium)
+            Text("1. 读成 ISO：放入数据盘（CD-ROM / CD-R、DVD、BD 都可以），在“读成 ISO”里先选保存文件夹，再点“开始读取”。可以中途取消，也可以试试读到一半弹盘。")
+            Text("2. 读完会在同一个文件夹生成 .iso、.log（报告，含 MD5 / SHA-1 / CRC32）和 .mapfile；有划痕的盘可以看坏扇区处理。")
+            Text("3. 自动播放：App 开着时放入音乐 CD，会出现“2 秒后播放”，可以取消或立即播放；开头 1 秒淡入。")
+            Text("4. 播放或读盘时如果光驱突然断开，会提示检查供电。测完点“导出日志（zip）”发给我。")
             Text(
-                "发给光驱的仍只有白名单里的只读命令（本版新增读取盘上条码的 READ SUB-CHANNEL），不会写盘，也不会修改地区码。联网只发送光盘目录、条码和搜索词，可在播放设置里关闭。",
+                "发给光驱的仍只有白名单里的只读命令（本版新增读数据扇区的 READ(10)），不会写盘，也不会修改地区码。CSS 加密的 DVD 要到阶段 3 才能读成 ISO。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

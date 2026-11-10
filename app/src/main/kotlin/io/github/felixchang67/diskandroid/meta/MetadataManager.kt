@@ -208,10 +208,17 @@ class MetadataManager(
             val r = withContext(Dispatchers.IO) {
                 runCatching { lyricsFinder.find(t.title, artist, meta.album, durationMs, t.neteaseSongId).also { store.saveLyrics(cacheKey, it) } }
             }
-            putLyrics(
-                key,
-                r.fold({ l -> if (l != null) LyricsState.Ready(l) else LyricsState.None }, { e -> LyricsState.Failed(e.message ?: e.toString()) }),
-            )
+            val st = r.fold({ l -> if (l != null) LyricsState.Ready(l) else LyricsState.None }, { e -> LyricsState.Failed(e.message ?: e.toString()) })
+            when (st) {
+                is LyricsState.Ready -> log.i(
+                    TAG, "第 $track 轨歌词：${st.lyrics.lines.size} 行", "来源" to st.lyrics.source,
+                    "同步" to st.lyrics.synced, "中文翻译" to st.lyrics.hasTranslation,
+                )
+                LyricsState.None -> log.i(TAG, "第 $track 轨没有找到歌词")
+                is LyricsState.Failed -> log.w(TAG, "第 $track 轨取歌词失败：${st.message}")
+                else -> Unit
+            }
+            putLyrics(key, st)
         }
     }
 
@@ -229,7 +236,12 @@ class MetadataManager(
         if (url in _covers.value || !coverRequests.add(url)) return
         scope.launch {
             val bitmap = withContext(Dispatchers.IO) { runCatching { loadCover(url) }.onFailure { log.w(TAG, "封面下载失败：${it.message}") }.getOrNull() }
-            if (bitmap != null) _covers.update { it + (url to bitmap) } else coverRequests.remove(url)
+            if (bitmap != null) {
+                log.i(TAG, "封面已载入", "尺寸" to "${bitmap.width}×${bitmap.height}", "来源" to url.substringBefore('?'))
+                _covers.update { it + (url to bitmap) }
+            } else {
+                coverRequests.remove(url)
+            }
         }
     }
 
@@ -260,7 +272,11 @@ class MetadataManager(
             }
             val cur = _discs.value[id] ?: base
             r.onSuccess { o ->
-                o.chosen?.let { store.save(it) }
+                o.chosen?.let { m ->
+                    store.save(m)
+                    log.i(TAG, "识别结果：${m.summary()}", "来源" to m.sources.joinToString(" + "))
+                    m.tracks.forEach { t -> log.i(TAG, "  ${t.number}. ${t.title}" + (t.translatedTitle?.let { "（$it）" } ?: "")) }
+                }
                 put(cur.copy(busy = null, metadata = o.chosen ?: cur.metadata, candidates = o.candidates, notes = o.notes))
                 o.chosen?.coverUrl?.let { requestCover(it) }
             }.onFailure { e ->

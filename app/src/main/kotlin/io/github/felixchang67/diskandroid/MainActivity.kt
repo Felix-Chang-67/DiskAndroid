@@ -37,6 +37,16 @@ class MainActivity : ComponentActivity() {
         viewModel.onResume()
     }
 
+    override fun onStart() {
+        super.onStart()
+        (application as DiskApp).container.uiVisible.value = true
+    }
+
+    override fun onStop() {
+        (application as DiskApp).container.uiVisible.value = false
+        super.onStop()
+    }
+
     /** 插上光驱、系统用 USB_DEVICE_ATTACHED 拉起/唤起本 Activity 时，意图里带着设备对象。 */
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {

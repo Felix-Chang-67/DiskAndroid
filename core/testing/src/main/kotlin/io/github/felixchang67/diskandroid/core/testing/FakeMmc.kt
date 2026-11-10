@@ -106,6 +106,7 @@ class FakeMmc {
             0xBD -> good(mechanismStatus(), allocation12(cdb))
             0x25, 0x51, 0x52, 0x43, 0xAD, 0xAC -> notReady() ?: mediaCommand(op, cdb)
             0xBE -> notReady() ?: readCd(cdb)
+            0x28 -> notReady() ?: read10(cdb)
             0x42 -> notReady() ?: subChannel(cdb)
             0xBB -> {
                 speedRequests += ((cdb[2].toInt() and 0xFF) shl 8) or (cdb[3].toInt() and 0xFF)
@@ -212,6 +213,57 @@ class FakeMmc {
         }
         val len = body.size
         return good(byteArrayOf((len shr 8).toByte(), len.toByte()) + body, allocation10(cdb))
+    }
+
+    private val flakyAttempts = mutableMapOf<Long, Int>()
+
+    /** READ(10) 读过的扇区总数（成功的）。 */
+    var dataSectorsRead = 0L
+
+    /**
+     * READ(10)：数据轨返回确定的内容（见 [dataSector]）；音轨 5/64/00（该轨道模式下非法）；
+     * 坏扇区 3/11/05；超出范围 5/21/00；CSS 加密 DVD 的加密扇区（LBA ≥ 1000）未认证时 5/6F/03。
+     */
+    private fun read10(cdb: ByteArray): Reply {
+        val d = disc!!
+        val lba = (((cdb[2].toInt() and 0xFF) shl 24) or ((cdb[3].toInt() and 0xFF) shl 16) or ((cdb[4].toInt() and 0xFF) shl 8) or (cdb[5].toInt() and 0xFF)).toLong()
+        val count = ((cdb[7].toInt() and 0xFF) shl 8) or (cdb[8].toInt() and 0xFF)
+        val out = ByteArray(count * 2048)
+        for (i in 0 until count) {
+            val sector = lba + i
+            if (sector >= d.leadOutLba) return check(0x5, 0x21, 0x00)
+            val track = d.tracks.firstOrNull { sector >= it.startLba && sector < it.startLba + it.sectors } ?: return check(0x5, 0x21, 0x00)
+            if (track.audio) return check(0x5, 0x64, 0x00)
+            if (d.dvdProtection == 1 && sector >= 1000) return check(0x5, 0x6F, 0x03)
+            if (sector in d.badSectors) return check(0x3, 0x11, 0x05)
+            d.flakySectors[sector]?.let { needed ->
+                val n = (flakyAttempts[sector] ?: 0) + 1
+                flakyAttempts[sector] = n
+                if (n < needed) return check(0x3, 0x11, 0x05)
+            }
+            dataSector(d, sector).copyInto(out, i * 2048)
+        }
+        dataSectorsRead += count
+        return good(out, out.size)
+    }
+
+    /** 测试用：数据扇区 [lba] 的内容（LBA 16 是 ISO 9660 主卷描述符时放卷标和卷大小）。 */
+    fun dataSector(d: FakeDisc, lba: Long): ByteArray {
+        val b = ByteArray(2048)
+        if (lba == 16L && d.volumeId != null) {
+            b[0] = 1
+            "CD001".toByteArray(Charsets.US_ASCII).copyInto(b, 1)
+            b[6] = 1
+            d.volumeId.padEnd(32).take(32).toByteArray(Charsets.US_ASCII).copyInto(b, 40)
+            val size = d.leadOutLba
+            for (k in 0 until 4) {
+                b[80 + k] = (size ushr (8 * k)).toByte()
+                b[87 - k] = (size ushr (8 * k)).toByte()
+            }
+            return b
+        }
+        for (i in 0 until 2048) b[i] = ((lba * 131 + i * 7 + (lba ushr 8)) and 0xFF).toByte()
+        return b
     }
 
     /** READ SUB-CHANNEL：只支持格式 02h（MCN）。 */

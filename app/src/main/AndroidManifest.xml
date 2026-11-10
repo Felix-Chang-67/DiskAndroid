@@ -11,6 +11,8 @@
     <!-- 音乐 CD 播放：前台服务（息屏后继续播放、通知栏 / 锁屏控制）、播放期间保持 CPU 运行 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 读成 ISO：前台服务类型 connectedDevice（持续与 USB 光驱通信；运行条件是已获得 USB 设备权限） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -47,6 +49,11 @@
             android:name=".player.CdPlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".rip.RipService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
