@@ -17,3 +17,9 @@ captures/
 KEYDB.cfg
 *.keydb
 plugins/decrypt/out/
+
+# 第三方原生库的源码与编译产物（由 native/third_party/build.sh 生成）
+native/third_party/out/
+
+# 原生播放器测试用的光盘镜像（test/make_menu_dvd.sh 生成）
+native/diskplayer/test/data/

@@ -1,0 +1,639 @@
+/*
+ * 原生播放器的 Android 部分：JNI 接口、读盘回调（转到 Kotlin 的 USB 读扇区）、OpenGL ES 3 视频输出、AAudio 音频输出。
+ * 播放核心（dp_dvd.c 等）与平台无关，在电脑上有单元测试。
+ */
+#include <EGL/egl.h>
+#include <GLES3/gl3.h>
+#include <aaudio/AAudio.h>
+#include <android/log.h>
+#include <android/native_window.h>
+#include <android/native_window_jni.h>
+#include <jni.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "../src/dp_core.h"
+#include "../src/dp_dvd.h"
+
+static JavaVM *g_vm;
+static jclass g_bridge_class;     /* io.github.felixchang67.diskandroid.core.player.NativeBridge */
+static jmethodID g_log_mid;       /* static void log(int level, String tag, String msg) */
+static pthread_key_t g_env_key;
+
+/* 原生线程第一次回调 Java 时挂到虚拟机上，线程退出时自动摘下。 */
+static void detach_thread(void *env) {
+    (void)env;
+    if (g_vm) (*g_vm)->DetachCurrentThread(g_vm);
+}
+
+static JNIEnv *get_env(void) {
+    JNIEnv *env = NULL;
+    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) return env;
+    if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) return NULL;
+    pthread_setspecific(g_env_key, env);
+    return env;
+}
+
+JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    g_vm = vm;
+    pthread_key_create(&g_env_key, detach_thread);
+    JNIEnv *env;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return -1;
+    jclass c = (*env)->FindClass(env, "io/github/felixchang67/diskandroid/core/player/NativeBridge");
+    if (!c) return -1;
+    g_bridge_class = (*env)->NewGlobalRef(env, c);
+    g_log_mid = (*env)->GetStaticMethodID(env, c, "log", "(ILjava/lang/String;Ljava/lang/String;)V");
+    return JNI_VERSION_1_6;
+}
+
+static void log_to_java(void *opaque, dp_log_level level, const char *tag, const char *msg) {
+    (void)opaque;
+    __android_log_print(level >= DP_LOG_ERROR ? ANDROID_LOG_ERROR : level >= DP_LOG_WARN ? ANDROID_LOG_WARN : ANDROID_LOG_DEBUG, tag, "%s", msg);
+    JNIEnv *env = get_env();
+    if (!env || !g_log_mid) return;
+    jstring t = (*env)->NewStringUTF(env, tag);
+    jstring m = (*env)->NewStringUTF(env, msg);
+    if (t && m) (*env)->CallStaticVoidMethod(env, g_bridge_class, g_log_mid, (jint)level, t, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (t) (*env)->DeleteLocalRef(env, t);
+    if (m) (*env)->DeleteLocalRef(env, m);
+}
+
+/* ---------------- 播放器实例 ---------------- */
+
+typedef struct {
+    /* Java 对象 */
+    jobject reader;          /* SectorReader：int read(long offset, ByteBuffer dst, int length) */
+    jmethodID read_mid;
+    jobject listener;        /* PlayerListener：void onEvent(int event, int a1, int a2, String text) */
+    jmethodID event_mid;
+
+    dp_source *src;
+    dp_dvd *dvd;
+
+    /* 视频（只在视频线程里碰 EGL / GL） */
+    pthread_mutex_t win_lock;
+    pthread_cond_t win_cond;
+    ANativeWindow *window;        /* 界面给的新 Surface（视频线程取走） */
+    bool window_changed;
+    ANativeWindow *cur_window;    /* 视频线程正在用的 */
+    EGLDisplay egl_dpy;
+    EGLContext egl_ctx;
+    EGLSurface egl_surf;
+    GLuint prog, tex[4], vbo;
+    GLint u_tex[4], u_has_ov;
+    int tex_w[3], tex_h[3];
+    int ov_w, ov_h;
+    bool ov_valid;
+    int surf_w, surf_h;
+    /* 最近一帧的显示比例（给界面把触摸点换算成视频坐标） */
+    volatile int disp_w, disp_h, frame_w, frame_h;
+
+    /* 音频（aa 只在音频线程里打开 / 关闭；别的线程用它要拿 aa_lock） */
+    pthread_mutex_t aa_lock;
+    AAudioStream *aa;
+    int aa_rate, aa_channels;
+    int64_t aa_base;              /* 上次清空时已写入的帧数（之后"已播放"从这里算起） */
+    bool aa_paused;
+} jplayer;
+
+/* 读盘回调（在导航线程里）：调 Kotlin 的 SectorReader.read。 */
+static int read_cb(void *opaque, uint64_t offset, uint8_t *buf, int len) {
+    jplayer *p = opaque;
+    JNIEnv *env = get_env();
+    if (!env) return -2;
+    jobject bb = (*env)->NewDirectByteBuffer(env, buf, len);
+    if (!bb) return -1;
+    jint r = (*env)->CallIntMethod(env, p->reader, p->read_mid, (jlong)offset, bb, (jint)len);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        r = -1;
+    }
+    (*env)->DeleteLocalRef(env, bb);
+    return r;
+}
+
+static void event_cb(void *opaque, int ev, int a1, int a2, const char *text) {
+    jplayer *p = opaque;
+    JNIEnv *env = get_env();
+    if (!env || !p->listener) return;
+    jstring t = text ? (*env)->NewStringUTF(env, text) : NULL;
+    (*env)->CallVoidMethod(env, p->listener, p->event_mid, (jint)ev, (jint)a1, (jint)a2, t);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (t) (*env)->DeleteLocalRef(env, t);
+}
+
+/* ---------------- OpenGL ES 3 视频输出 ---------------- */
+
+static const char *VS =
+    "#version 300 es\n"
+    "layout(location=0) in vec2 pos;\n"
+    "layout(location=1) in vec2 uv;\n"
+    "out vec2 v_uv;\n"
+    "void main(){ v_uv = uv; gl_Position = vec4(pos, 0.0, 1.0); }\n";
+
+static const char *FS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "in vec2 v_uv;\n"
+    "uniform sampler2D ty; uniform sampler2D tu; uniform sampler2D tv; uniform sampler2D tov;\n"
+    "uniform int has_ov;\n"
+    "out vec4 color;\n"
+    "void main(){\n"
+    "  float y = 1.16438 * (texture(ty, v_uv).r - 0.0625);\n"
+    "  float u = texture(tu, v_uv).r - 0.5;\n"
+    "  float v = texture(tv, v_uv).r - 0.5;\n"
+    "  vec3 rgb = vec3(y + 1.59603 * v, y - 0.39176 * u - 0.81297 * v, y + 2.01723 * u);\n"
+    "  if (has_ov == 1) { vec4 o = texture(tov, v_uv); rgb = mix(rgb, o.rgb, o.a); }\n"
+    "  color = vec4(clamp(rgb, 0.0, 1.0), 1.0);\n"
+    "}\n";
+
+static GLuint compile(GLenum type, const char *src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+    GLint ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(s, sizeof(log), NULL, log);
+        dp_log(DP_LOG_ERROR, "VIDEO", "着色器编译失败：%s", log);
+    }
+    return s;
+}
+
+static void gl_teardown(jplayer *p) {
+    if (p->egl_dpy == EGL_NO_DISPLAY || !p->egl_dpy) return;
+    eglMakeCurrent(p->egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (p->egl_surf != EGL_NO_SURFACE) eglDestroySurface(p->egl_dpy, p->egl_surf);
+    if (p->egl_ctx != EGL_NO_CONTEXT) eglDestroyContext(p->egl_dpy, p->egl_ctx);
+    eglTerminate(p->egl_dpy);
+    p->egl_dpy = EGL_NO_DISPLAY;
+    p->egl_ctx = EGL_NO_CONTEXT;
+    p->egl_surf = EGL_NO_SURFACE;
+    p->prog = 0;
+    memset(p->tex_w, 0, sizeof(p->tex_w));
+    p->ov_w = p->ov_h = 0;
+}
+
+/* 视频线程：界面换了 Surface（或者 Surface 要销毁了）就拆掉旧的 EGL，换上新窗口，并通知等着的界面线程。 */
+static void gl_check_window(jplayer *p) {
+    pthread_mutex_lock(&p->win_lock);
+    if (p->window_changed) {
+        p->window_changed = false;
+        gl_teardown(p);
+        if (p->cur_window) ANativeWindow_release(p->cur_window);
+        p->cur_window = p->window;
+        if (p->cur_window) ANativeWindow_acquire(p->cur_window);
+        pthread_cond_broadcast(&p->win_cond);
+    }
+    pthread_mutex_unlock(&p->win_lock);
+}
+
+/* 视频线程：需要时建 EGL。返回 false 表示现在没有可画的 Surface。 */
+static bool gl_ensure(jplayer *p) {
+    gl_check_window(p);
+    pthread_mutex_lock(&p->win_lock);
+    ANativeWindow *win = p->cur_window;
+    pthread_mutex_unlock(&p->win_lock);
+    if (!win) return false;
+    if (p->egl_surf != EGL_NO_SURFACE && p->egl_dpy) return true;
+
+    p->egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(p->egl_dpy, NULL, NULL);
+    const EGLint attrs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+                            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
+    EGLConfig cfg;
+    EGLint n = 0;
+    if (!eglChooseConfig(p->egl_dpy, attrs, &cfg, 1, &n) || n < 1) {
+        dp_log(DP_LOG_ERROR, "VIDEO", "EGL 找不到可用的配置");
+        return false;
+    }
+    const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    p->egl_ctx = eglCreateContext(p->egl_dpy, cfg, EGL_NO_CONTEXT, ctx_attrs);
+    p->egl_surf = eglCreateWindowSurface(p->egl_dpy, cfg, win, NULL);
+    if (p->egl_ctx == EGL_NO_CONTEXT || p->egl_surf == EGL_NO_SURFACE || !eglMakeCurrent(p->egl_dpy, p->egl_surf, p->egl_surf, p->egl_ctx)) {
+        dp_log(DP_LOG_ERROR, "VIDEO", "EGL 初始化失败：0x%x", eglGetError());
+        gl_teardown(p);
+        return false;
+    }
+    eglSwapInterval(p->egl_dpy, 1);
+    GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, FS);
+    p->prog = glCreateProgram();
+    glAttachShader(p->prog, vs);
+    glAttachShader(p->prog, fs);
+    glLinkProgram(p->prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    glUseProgram(p->prog);
+    const char *names[4] = {"ty", "tu", "tv", "tov"};
+    glGenTextures(4, p->tex);
+    for (int i = 0; i < 4; i++) {
+        p->u_tex[i] = glGetUniformLocation(p->prog, names[i]);
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, p->tex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glUniform1i(p->u_tex[i], i);
+    }
+    p->u_has_ov = glGetUniformLocation(p->prog, "has_ov");
+    glGenBuffers(1, &p->vbo);
+    eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_WIDTH, &p->surf_w);
+    eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_HEIGHT, &p->surf_h);
+    dp_log(DP_LOG_INFO, "VIDEO", "视频输出就绪：%d×%d（OpenGL ES 3）", p->surf_w, p->surf_h);
+    return true;
+}
+
+static void upload_plane(jplayer *p, int i, const uint8_t *data, int stride, int w, int h) {
+    glActiveTexture(GL_TEXTURE0 + i);
+    glBindTexture(GL_TEXTURE_2D, p->tex[i]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, stride);
+    if (p->tex_w[i] != w || p->tex_h[i] != h) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+        p->tex_w[i] = w;
+        p->tex_h[i] = h;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RED, GL_UNSIGNED_BYTE, data);
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+}
+
+static void video_present(void *opaque, const dp_frame *f, const uint32_t *overlay, bool changed) {
+    jplayer *p = opaque;
+    if (!gl_ensure(p)) return;
+    EGLint sw = 0, sh = 0;
+    eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_WIDTH, &sw);
+    eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_HEIGHT, &sh);
+    p->surf_w = sw;
+    p->surf_h = sh;
+    upload_plane(p, 0, f->plane[0], f->stride[0], f->width, f->height);
+    upload_plane(p, 1, f->plane[1], f->stride[1], (f->width + 1) / 2, (f->height + 1) / 2);
+    upload_plane(p, 2, f->plane[2], f->stride[2], (f->width + 1) / 2, (f->height + 1) / 2);
+    if (overlay) {
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, p->tex[3]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        if (p->ov_w != f->width || p->ov_h != f->height) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f->width, f->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, overlay);
+            p->ov_w = f->width;
+            p->ov_h = f->height;
+        } else if (changed || !p->ov_valid) {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, overlay);
+        }
+        p->ov_valid = true;
+    } else {
+        p->ov_valid = false;
+    }
+    /* 按显示比例（像素宽高比 × 尺寸）在 Surface 里居中 */
+    double dar = (double)f->width * f->sar_num / ((double)f->height * (f->sar_den ? f->sar_den : 1));
+    int vw = sw, vh = (int)(sw / dar);
+    if (vh > sh) {
+        vh = sh;
+        vw = (int)(sh * dar);
+    }
+    int vx = (sw - vw) / 2, vy = (sh - vh) / 2;
+    p->disp_w = vw;
+    p->disp_h = vh;
+    p->frame_w = f->width;
+    p->frame_h = f->height;
+    glViewport(0, 0, sw, sh);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(vx, vy, vw, vh);
+    const float quad[] = {-1, -1, 0, 1, 1, -1, 1, 1, -1, 1, 0, 0, 1, 1, 1, 0};
+    glUseProgram(p->prog);
+    glUniform1i(p->u_has_ov, overlay ? 1 : 0);
+    glBindBuffer(GL_ARRAY_BUFFER, p->vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STREAM_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (!eglSwapBuffers(p->egl_dpy, p->egl_surf)) {
+        EGLint e = eglGetError();
+        if (e == EGL_BAD_SURFACE || e == EGL_BAD_NATIVE_WINDOW) gl_teardown(p);
+    }
+}
+
+static void video_idle(void *opaque) {
+    gl_check_window(opaque);
+}
+
+/* 视频线程退出前：EGL 上下文只能在用它的线程里释放。 */
+static void video_exit(void *opaque) {
+    jplayer *p = opaque;
+    gl_teardown(p);
+    pthread_mutex_lock(&p->win_lock);
+    if (p->cur_window) ANativeWindow_release(p->cur_window);
+    p->cur_window = NULL;
+    pthread_cond_broadcast(&p->win_cond);
+    pthread_mutex_unlock(&p->win_lock);
+}
+
+/* ---------------- AAudio 音频输出 ---------------- */
+
+static AAudioStream *aa_create(int rate, int channels) {
+    AAudioStreamBuilder *b = NULL;
+    if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return NULL;
+    AAudioStreamBuilder_setDirection(b, AAUDIO_DIRECTION_OUTPUT);
+    AAudioStreamBuilder_setSampleRate(b, rate);
+    AAudioStreamBuilder_setChannelCount(b, channels);
+    AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_MEDIA);
+    AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_MOVIE);
+    AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_NONE);
+    AAudioStream *st = NULL;
+    aaudio_result_t r = AAudioStreamBuilder_openStream(b, &st);
+    AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) {
+        dp_log(DP_LOG_ERROR, "VIDEO", "AAudio 打不开：%s", AAudio_convertResultToText(r));
+        return NULL;
+    }
+    dp_log(DP_LOG_INFO, "VIDEO", "音频输出：%d Hz %d 声道，缓冲 %d 帧", AAudioStream_getSampleRate(st), AAudioStream_getChannelCount(st),
+           AAudioStream_getBufferSizeInFrames(st));
+    return st;
+}
+
+/* 音频线程 */
+static int audio_open(void *opaque, int rate, int channels) {
+    jplayer *p = opaque;
+    if (p->aa) return 0;
+    AAudioStream *st = aa_create(rate, channels);
+    if (!st) return -1;
+    pthread_mutex_lock(&p->aa_lock);
+    p->aa = st;
+    p->aa_rate = rate;
+    p->aa_channels = channels;
+    p->aa_base = 0;
+    if (!p->aa_paused) AAudioStream_requestStart(st);
+    pthread_mutex_unlock(&p->aa_lock);
+    return 0;
+}
+
+/* 音频线程：阻塞写入。输出设备断开（拔耳机、蓝牙断开）时重开一个流接着放。 */
+static int audio_write(void *opaque, const int16_t *pcm, int frames) {
+    jplayer *p = opaque;
+    if (!p->aa) return -1;
+    aaudio_result_t r = AAudioStream_write(p->aa, pcm, frames, 200 * 1000000LL);
+    if (r == AAUDIO_ERROR_DISCONNECTED) {
+        dp_log(DP_LOG_INFO, "VIDEO", "音频输出设备变了，重新打开");
+        AAudioStream *st = aa_create(p->aa_rate, p->aa_channels);
+        pthread_mutex_lock(&p->aa_lock);
+        AAudioStream *old = p->aa;
+        /* 旧流上已经播放的帧接着算，时钟不跳 */
+        int64_t old_written = AAudioStream_getFramesWritten(old);
+        p->aa = st;
+        p->aa_base -= old_written;
+        if (st && !p->aa_paused) AAudioStream_requestStart(st);
+        pthread_mutex_unlock(&p->aa_lock);
+        AAudioStream_requestStop(old);
+        AAudioStream_close(old);
+        if (!st) return -1;
+        return 0;
+    }
+    if (r < 0) {
+        dp_log(DP_LOG_WARN, "VIDEO", "AAudio 写入失败：%s", AAudio_convertResultToText(r));
+        return -1;
+    }
+    return r;
+}
+
+/* 已经播放出去的帧（相对上次清空）：用 AAudio 的时间戳推算"此刻扬声器里在放哪一帧"。视频线程调用。 */
+static int64_t audio_played(void *opaque) {
+    jplayer *p = opaque;
+    pthread_mutex_lock(&p->aa_lock);
+    if (!p->aa) {
+        pthread_mutex_unlock(&p->aa_lock);
+        return 0;
+    }
+    int64_t pos = 0, t = 0, played;
+    if (!p->aa_paused && AAudioStream_getTimestamp(p->aa, CLOCK_MONOTONIC, &pos, &t) == AAUDIO_OK) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        int64_t now = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        played = pos + (now - t) * AAudioStream_getSampleRate(p->aa) / 1000000000LL;
+    } else {
+        played = AAudioStream_getFramesRead(p->aa);
+    }
+    int64_t written = AAudioStream_getFramesWritten(p->aa);
+    if (played > written) played = written;
+    played -= p->aa_base;
+    pthread_mutex_unlock(&p->aa_lock);
+    return played < 0 ? 0 : played;
+}
+
+/* 导航线程（用户暂停 / 继续）。 */
+static void audio_pause(void *opaque, bool pause) {
+    jplayer *p = opaque;
+    pthread_mutex_lock(&p->aa_lock);
+    p->aa_paused = pause;
+    if (p->aa) {
+        if (pause) AAudioStream_requestPause(p->aa); else AAudioStream_requestStart(p->aa);
+    }
+    pthread_mutex_unlock(&p->aa_lock);
+}
+
+/* 音频线程（跳转）：丢掉缓冲里还没放的声音。暂停中跳转的话保持暂停。 */
+static void audio_flush(void *opaque) {
+    jplayer *p = opaque;
+    pthread_mutex_lock(&p->aa_lock);
+    if (p->aa) {
+        aaudio_stream_state_t st = AAUDIO_STREAM_STATE_UNKNOWN;
+        AAudioStream_requestPause(p->aa);
+        AAudioStream_waitForStateChange(p->aa, AAUDIO_STREAM_STATE_PAUSING, &st, 200 * 1000000LL);
+        AAudioStream_requestFlush(p->aa);
+        AAudioStream_waitForStateChange(p->aa, AAUDIO_STREAM_STATE_FLUSHING, &st, 200 * 1000000LL);
+        p->aa_base = AAudioStream_getFramesWritten(p->aa);
+        if (!p->aa_paused) AAudioStream_requestStart(p->aa);
+    }
+    pthread_mutex_unlock(&p->aa_lock);
+}
+
+/* 音频线程退出前。 */
+static void audio_close(void *opaque) {
+    jplayer *p = opaque;
+    pthread_mutex_lock(&p->aa_lock);
+    AAudioStream *st = p->aa;
+    p->aa = NULL;
+    pthread_mutex_unlock(&p->aa_lock);
+    if (st) {
+        AAudioStream_requestStop(st);
+        AAudioStream_close(st);
+    }
+}
+
+/* ---------------- JNI ---------------- */
+
+#define JFN(name) Java_io_github_felixchang67_diskandroid_core_player_NativeBridge_##name
+
+JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject reader, jlong size, jobject listener, jint region_mask,
+                                           jstring menu_lang, jstring audio_lang, jstring spu_lang, jint start_title, jboolean deinterlace,
+                                           jint prefetch, jobjectArray err_out) {
+    (void)cls;
+    dp_log_set(log_to_java, NULL);
+    jplayer *p = calloc(1, sizeof(*p));
+    if (!p) return 0;
+    pthread_mutex_init(&p->win_lock, NULL);
+    pthread_cond_init(&p->win_cond, NULL);
+    pthread_mutex_init(&p->aa_lock, NULL);
+    p->egl_dpy = EGL_NO_DISPLAY;
+    p->egl_ctx = EGL_NO_CONTEXT;
+    p->egl_surf = EGL_NO_SURFACE;
+    p->reader = (*env)->NewGlobalRef(env, reader);
+    jclass rc = (*env)->GetObjectClass(env, reader);
+    p->read_mid = (*env)->GetMethodID(env, rc, "read", "(JLjava/nio/ByteBuffer;I)I");
+    p->listener = (*env)->NewGlobalRef(env, listener);
+    jclass lc = (*env)->GetObjectClass(env, listener);
+    p->event_mid = (*env)->GetMethodID(env, lc, "onEvent", "(IIILjava/lang/String;)V");
+    p->src = dp_source_new(read_cb, p, (uint64_t)size, prefetch);
+
+    dp_platform pf = {
+        .opaque = p, .video_present = video_present, .video_idle = video_idle, .video_exit = video_exit,
+        .audio_open = audio_open, .audio_write = audio_write,
+        .audio_played = audio_played, .audio_pause = audio_pause, .audio_flush = audio_flush, .audio_close = audio_close,
+        .on_event = event_cb, .realtime = true,
+    };
+    dp_dvd_options opt;
+    memset(&opt, 0, sizeof(opt));
+    opt.region_mask = region_mask;
+    opt.start_title = start_title;
+    opt.deinterlace = deinterlace;
+    const char *s;
+    s = (*env)->GetStringUTFChars(env, menu_lang, NULL);
+    strncpy(opt.menu_lang, s, 2);
+    (*env)->ReleaseStringUTFChars(env, menu_lang, s);
+    s = (*env)->GetStringUTFChars(env, audio_lang, NULL);
+    strncpy(opt.audio_lang, s, 2);
+    (*env)->ReleaseStringUTFChars(env, audio_lang, s);
+    s = (*env)->GetStringUTFChars(env, spu_lang, NULL);
+    strncpy(opt.spu_lang, s, 2);
+    (*env)->ReleaseStringUTFChars(env, spu_lang, s);
+
+    char err[256] = "";
+    p->dvd = dp_dvd_open(p->src, &pf, &opt, err, sizeof(err));
+    if (!p->dvd) {
+        if (err_out && (*env)->GetArrayLength(env, err_out) > 0) {
+            jstring e = (*env)->NewStringUTF(env, err);
+            (*env)->SetObjectArrayElement(env, err_out, 0, e);
+        }
+        dp_source_free(p->src);
+        (*env)->DeleteGlobalRef(env, p->reader);
+        (*env)->DeleteGlobalRef(env, p->listener);
+        pthread_mutex_destroy(&p->win_lock);
+        pthread_cond_destroy(&p->win_cond);
+        pthread_mutex_destroy(&p->aa_lock);
+        free(p);
+        return 0;
+    }
+    return (jlong)(intptr_t)p;
+}
+
+JNIEXPORT void JNICALL JFN(nativeStart)(JNIEnv *env, jclass cls, jlong h) {
+    (void)env;
+    (void)cls;
+    jplayer *p = (jplayer *)(intptr_t)h;
+    if (p) dp_dvd_start(p->dvd);
+}
+
+JNIEXPORT void JNICALL JFN(nativeCommand)(JNIEnv *env, jclass cls, jlong h, jint cmd, jint a1, jint a2) {
+    (void)env;
+    (void)cls;
+    jplayer *p = (jplayer *)(intptr_t)h;
+    if (p) dp_dvd_command(p->dvd, cmd, a1, a2);
+}
+
+JNIEXPORT void JNICALL JFN(nativeSetSurface)(JNIEnv *env, jclass cls, jlong h, jobject surface) {
+    (void)cls;
+    jplayer *p = (jplayer *)(intptr_t)h;
+    if (!p) return;
+    ANativeWindow *w = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    pthread_mutex_lock(&p->win_lock);
+    if (p->window) ANativeWindow_release(p->window);
+    p->window = w;
+    p->window_changed = true;
+    /* Surface 要销毁了：等视频线程放手（surfaceDestroyed 返回后就不能再往上画），最多等 500 ms */
+    if (!w && p->cur_window) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 500 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000L;
+        }
+        while (p->window_changed && p->cur_window) {
+            if (pthread_cond_timedwait(&p->win_cond, &p->win_lock, &ts) != 0) {
+                dp_log(DP_LOG_WARN, "VIDEO", "视频线程没有及时放开 Surface");
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&p->win_lock);
+    dp_dvd_refresh(p->dvd);
+}
+
+/*
+ * 状态：ints 依次是 域、标题、章节、标题数、章节数、按钮数、当前按钮、静止、暂停、结束、
+ * 音轨数、当前音轨、字幕数、当前字幕、字幕显示、角度数、当前角度、视频宽、视频高、16:9、显示宽、显示高、帧宽、帧高、音频流号；
+ * longs 依次是 位置 ms、时长 ms、读盘字节、读错扇区、显示帧数、丢帧数、音频帧数；
+ * strings：音轨说明（最多 8）+ 字幕说明（最多 32）。
+ */
+JNIEXPORT jobjectArray JNICALL JFN(nativeGetState)(JNIEnv *env, jclass cls, jlong h, jintArray ints, jlongArray longs) {
+    (void)cls;
+    jplayer *p = (jplayer *)(intptr_t)h;
+    if (!p) return NULL;
+    dp_dvd_state s;
+    dp_dvd_get_state(p->dvd, &s);
+    jint iv[25] = {s.domain, s.title, s.chapter, s.titles, s.chapters, s.buttons, s.button, s.still, s.paused, s.ended,
+                   s.audio_count, s.audio_current, s.spu_count, s.spu_current, s.spu_shown, s.angles, s.angle,
+                   s.video_w, s.video_h, s.wide, p->disp_w, p->disp_h, p->frame_w, p->frame_h, s.audio_code};
+    (*env)->SetIntArrayRegion(env, ints, 0, 25, iv);
+    jlong lv[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
+                   (jlong)s.audio_frames};
+    (*env)->SetLongArrayRegion(env, longs, 0, 7, lv);
+    jclass sc = (*env)->FindClass(env, "java/lang/String");
+    jobjectArray arr = (*env)->NewObjectArray(env, s.audio_count + s.spu_count, sc, NULL);
+    for (int i = 0; i < s.audio_count; i++) {
+        jstring t = (*env)->NewStringUTF(env, s.audio_desc[i]);
+        (*env)->SetObjectArrayElement(env, arr, i, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    for (int i = 0; i < s.spu_count; i++) {
+        jstring t = (*env)->NewStringUTF(env, s.spu_desc[i]);
+        (*env)->SetObjectArrayElement(env, arr, s.audio_count + i, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    return arr;
+}
+
+JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
+    (void)cls;
+    jplayer *p = (jplayer *)(intptr_t)h;
+    if (!p) return;
+    /* 先停线程：视频线程退出前自己拆 EGL（video_exit），音频线程自己关 AAudio */
+    dp_dvd_close(p->dvd);
+    pthread_mutex_lock(&p->win_lock);
+    if (p->window) ANativeWindow_release(p->window);
+    if (p->cur_window) ANativeWindow_release(p->cur_window);
+    p->window = p->cur_window = NULL;
+    pthread_mutex_unlock(&p->win_lock);
+    audio_close(p);
+    dp_source_free(p->src);
+    (*env)->DeleteGlobalRef(env, p->reader);
+    (*env)->DeleteGlobalRef(env, p->listener);
+    pthread_mutex_destroy(&p->win_lock);
+    pthread_cond_destroy(&p->win_cond);
+    pthread_mutex_destroy(&p->aa_lock);
+    free(p);
+}
+
+JNIEXPORT jstring JNICALL JFN(nativeVersion)(JNIEnv *env, jclass cls) {
+    (void)cls;
+    return (*env)->NewStringUTF(env, "diskplayer/1 (libdvdnav 7.0.0, libdvdread 7.1.1, FFmpeg 9.0.2)");
+}
