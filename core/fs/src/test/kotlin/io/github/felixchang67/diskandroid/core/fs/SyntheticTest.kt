@@ -80,4 +80,27 @@ class SyntheticTest {
         val fs = DiscFs.open(src, vol)!!
         assertEquals("sjis ok", String(fs.readAll(fs.find("/テスト.TXT")!!)))
     }
+
+    /** 读小文件时的预读不越过文件结尾（后面是 CSS 加密的 VOB 时会读出错）。 */
+    @Test
+    fun cachedSmallFileReadsDoNotReadPastTheFile() = runTest {
+        val img = TestImages.isoShiftJis()
+        val requested = mutableListOf<LongRange>()
+        val inner = object : SectorSource {
+            val base = ByteArraySectorSource(img)
+            override val sectorCount = base.sectorCount
+            override suspend fun read(lba: Long, count: Int, dst: ByteArray, offset: Int) {
+                requested += lba until lba + count
+                // 文件后面的扇区"读不出"（模拟未认证的 CSS 扇区）
+                if (lba <= 44 && lba + count > 44) throw SectorReadException(lba, count, "5/6F/03", protected = true)
+                base.read(lba, count, dst, offset)
+            }
+        }
+        val src = CachedSectorSource(inner)
+        val fs = DiscFs.open(src, DiscFs.probe(src))!!
+        requested.clear()
+        assertEquals("sjis ok", String(fs.readAll(fs.find("/テスト.TXT")!!)).trimEnd('\u0000'))
+        // テスト.TXT 只占扇区 43：只读这一个，没有碰到 44
+        assertEquals(listOf(43L..43L), requested)
+    }
 }

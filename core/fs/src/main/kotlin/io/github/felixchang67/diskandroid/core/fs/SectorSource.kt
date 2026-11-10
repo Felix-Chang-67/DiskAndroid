@@ -53,15 +53,20 @@ class CachedSectorSource(
 
     override val sectorCount: Long? get() = inner.sectorCount
 
-    /** 读一个扇区（经缓存）。返回的数组是缓存里的，调用方不要修改。 */
-    suspend fun sector(lba: Long): ByteArray = mutex.withLock {
+    /**
+     * 读一个扇区（经缓存）。返回的数组是缓存里的，调用方不要修改。
+     * @param limit 最多预读几个扇区（读文件时传文件剩下的扇区数：N2.2 真机上读 IFO 时预读进了后面的 VOB，
+     *   CSS 盘的 VOB 扇区未认证读不出，白白多了一次 5/6F/03 错误和 STALL）
+     */
+    suspend fun sector(lba: Long, limit: Int = readAhead): ByteArray = mutex.withLock {
         cache[lba]?.let {
             hits++
             return@withLock it
         }
         val end = sectorCount
         if (lba < 0 || (end != null && lba >= end)) throw SectorReadException(lba, 1, "扇区 $lba 超出盘片范围（共 ${end ?: "?"} 扇区）")
-        var n = if (end != null) minOf(readAhead.toLong(), end - lba).toInt() else readAhead
+        val ahead = minOf(readAhead, limit).coerceAtLeast(1)
+        var n = if (end != null) minOf(ahead.toLong(), end - lba).toInt() else ahead
         n = n.coerceAtLeast(1)
         val buf = ByteArray(n * SECTOR_SIZE)
         try {

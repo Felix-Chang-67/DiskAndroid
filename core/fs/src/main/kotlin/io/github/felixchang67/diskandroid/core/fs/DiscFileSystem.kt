@@ -100,7 +100,12 @@ class DiscFileReader(
         val skip = (inRun % SECTOR_SIZE).toInt()
         val count = minOf(((skip + want + SECTOR_SIZE - 1) / SECTOR_SIZE).toLong(), maxSectors.toLong()).toInt()
         if (cache != null) {
-            for (i in 0 until count) System.arraycopy(cache.sector(first + i), 0, buf, i * SECTOR_SIZE, SECTOR_SIZE)
+            // 预读不越过这一段的结尾
+            val runEnd = sector + (run.length + SECTOR_SIZE - 1) / SECTOR_SIZE
+            for (i in 0 until count) {
+                val lba = first + i
+                System.arraycopy(cache.sector(lba, limit = (runEnd - lba).coerceIn(1, Int.MAX_VALUE.toLong()).toInt()), 0, buf, i * SECTOR_SIZE, SECTOR_SIZE)
+            }
         } else {
             src.read(first, count, buf, 0)
         }
