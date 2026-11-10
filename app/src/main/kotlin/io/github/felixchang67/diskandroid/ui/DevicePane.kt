@@ -91,6 +91,7 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onRefresh = { vm.refreshDrive(d.deviceName) },
                 discExtras = { session, disc ->
                     if (disc.hasAudio) CdPlayerSection(session, disc, vm.player, vm.metadata) { track -> vm.playTrack(d.deviceName, track) }
+                    VideoSection(session, disc, vm.files)
                     if (vm.files.browsable(disc)) DiscFilesSection(session, disc, vm.files) { entries -> vm.startCopy(d.deviceName, entries) }
                     if (disc.dataTracks.isNotEmpty() || disc.family != io.github.felixchang67.diskandroid.core.mmc.MmcNames.DiscFamily.CD) {
                         RipSection(session, disc, vm.rip, vm.files) { options -> vm.startRip(d.deviceName, options) }
@@ -118,14 +119,14 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
 private fun GuideCard() {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("测试节点 ${BuildConfig.TEST_NODE}：浏览盘上的文件", style = MaterialTheme.typography.titleMedium)
-            Text("1. 放入数据盘（DVD、BD、CD-ROM、自己刻的盘都可以）：“盘上的文件”会显示文件系统（UDF / ISO 9660 / Joliet）、卷标和盘片类型（DVD-Video、BDMV 等）。点文件夹进入，看日文文件名是否正常。")
-            Text("2. 选好保存位置后，可以“复制”单个文件、当前文件夹或整张盘的文件（有版权保护的盘不提供复制）。")
-            Text("3. 再把上次那张 DVD+RW 读成 ISO：文件名应该是正确的日文卷标，而且只读文件系统实际用到的部分（比上次快）；报告里会列出中途的复位。")
-            Text("4. 加强版 CD（带数据区段的音乐 CD）：点“查看数据区段里的文件”。也可以试试自己用 Windows 刻的盘（“类似于 USB 闪存驱动器”方式）。")
+            Text("测试节点 ${BuildConfig.TEST_NODE}：识别视频盘的主片", style = MaterialTheme.typography.titleMedium)
+            Text("1. 放入 DVD 或 BD（商业的演唱会盘也可以：CSS / AACS 加密只针对视频数据，标题列表照样能读）。“视频内容”会列出所有标题的时长、章节数、音轨和字幕，并自动挑出主片。")
+            Text("2. 看主片挑得对不对；不对的话在“其他标题”里点“选这个”，并告诉我是哪张盘、正确的是哪一个。")
+            Text("3. “解码器”一行显示这台平板能不能直接解码这张盘的视频和音频（例如 AC-3），为下一步播放做准备。")
+            Text("4. 上次那张 DVD+RW 的 UDF 卷标乱码（¥Ò¥È¥ê¥¨）已修好，可以再放一次确认文件名和卷标。")
             Text("5. 测完点“导出日志（zip）”发给我。")
             Text(
-                "发给光驱的仍只有白名单里的只读命令，不会写盘，也不会修改地区码。CSS 加密的 DVD 要到阶段 3 才能读成 ISO；视频播放在 N2.2。",
+                "发给光驱的仍只有白名单里的只读命令，不会写盘，也不会修改地区码。CSS 加密的 DVD 要到阶段 3 才能读成 ISO；视频播放从 N2.3 开始。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

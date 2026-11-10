@@ -1,0 +1,40 @@
+libdvdread: Encrypted DVD support unavailable.************************************************
+**                                            **
+**  No css library available. See             **
+**  /usr/share/doc/libdvdread4/README.css     **
+**  for more information.                     **
+**                                            **
+************************************************
+
+Disc Title: unknown
+Title: 01, Length: 00:00:08.000 Chapters: 03, Cells: 03, Audio streams: 02, Subpictures: 00
+	VTS: 01, TTN: 01, FPS: 25.00, Format: PAL, Aspect ratio: 16/9, Width: 720, Height: 576, DF: P&S + Letter
+	Palette: 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 
+	Number of Angles: 1
+	Audio: 1, Language: ja - Japanese, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 1, AP: 0, Content: Undefined, Stream id: 0x80
+	Audio: 2, Language: en - English, Format: mpeg1, Frequency: 48000, Quantization: 20bit, Channels: 2, AP: 0, Content: Undefined, Stream id: 0xc1
+	Chapter: 01, Length: 00:00:01.920, Start Cell: 01
+	Chapter: 02, Length: 00:00:02.880, Start Cell: 02
+	Chapter: 03, Length: 00:00:03.200, Start Cell: 03
+	Cell: 01, Length: 00:00:01.920
+	Cell: 02, Length: 00:00:02.880
+	Cell: 03, Length: 00:00:03.200
+Title: 02, Length: 00:00:03.000 Chapters: 01, Cells: 01, Audio streams: 01, Subpictures: 00
+	VTS: 02, TTN: 01, FPS: 25.00, Format: PAL, Aspect ratio: 4/3, Width: 720, Height: 576, DF: ?
+	Palette: 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 
+	Number of Angles: 1
+	Audio: 1, Language: ja - Japanese, Format: lpcm , Frequency: 48000, Quantization: 16bit, Channels: 1, AP: 0, Content: Undefined, Stream id: 0xa0
+	Chapter: 01, Length: 00:00:03.000, Start Cell: 01
+	Cell: 01, Length: 00:00:03.000
+Title: 03, Length: 00:00:08.000 Chapters: 02, Cells: 04, Audio streams: 01, Subpictures: 00
+	VTS: 03, TTN: 01, FPS: 29.97, Format: NTSC, Aspect ratio: 16/9, Width: 720, Height: 480, DF: P&S + Letter
+	Palette: 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 108080 
+	Number of Angles: 1
+	Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Undefined, Stream id: 0x80
+	Chapter: 01, Length: 00:00:01.500, Start Cell: 01
+	Chapter: 02, Length: 00:00:06.500, Start Cell: 02
+	Cell: 01, Length: 00:00:01.500
+	Cell: 02, Length: 00:00:02.500
+	Cell: 03, Length: 00:00:01.500
+	Cell: 04, Length: 00:00:02.500
+Longest track: 01

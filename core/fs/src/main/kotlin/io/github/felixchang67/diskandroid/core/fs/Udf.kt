@@ -658,11 +658,11 @@ class UdfFileSystem internal constructor(private val src: CachedSectorSource, va
         return reader.runs(h.node, volume.maps)
     }
 
-    override suspend fun open(file: DiscEntry): DiscFileReader {
+    override suspend fun open(file: DiscEntry, cached: Boolean): DiscFileReader {
         val h = file.handle as? Handle ?: throw DiscFsException("「${file.name}」的文件项读不出来")
         val embedded = h.node.embedded
         if (embedded != null) return DiscFileReader(EmbeddedSource(embedded), embedded.size.toLong(), listOf(DataRun(0, embedded.size.toLong(), 0)))
-        return DiscFileReader(src, h.node.size, reader.runs(h.node, volume.maps))
+        return DiscFileReader(src, h.node.size, reader.runs(h.node, volume.maps), cache = if (cached) src else null)
     }
 
     /** 嵌在文件项里的小文件：当成从扇区 0 开始的一小段内存。 */

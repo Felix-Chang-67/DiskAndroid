@@ -37,8 +37,12 @@ interface DiscFileSystem {
     /** 文件内容在盘上的位置。 */
     suspend fun runs(file: DiscEntry): List<DataRun>
 
-    /** 打开文件按偏移读取。 */
-    suspend fun open(file: DiscEntry): DiscFileReader
+    /**
+     * 打开文件按偏移读取。
+     * @param cached 经元数据缓存读（带预读）：适合一次读很多个小文件（BD 的几百个播放列表、DVD 的 IFO），
+     *   相邻的小文件常在连续扇区里，一条命令能读到好几个。大文件不要用，会把缓存冲掉。
+     */
+    suspend fun open(file: DiscEntry, cached: Boolean = false): DiscFileReader
 }
 
 /** 按路径找文件（不分大小写，"/" 分隔）。 */
@@ -51,11 +55,11 @@ suspend fun DiscFileSystem.find(path: String): DiscEntry? {
     return cur
 }
 
-/** 把一个不大的文件整个读出来（IFO、index.bdmv 之类）。 */
+/** 把一个不大的文件整个读出来（IFO、index.bdmv 之类）；256 KB 以下经元数据缓存读。 */
 suspend fun DiscFileSystem.readAll(file: DiscEntry, limit: Int = 16 shl 20): ByteArray {
     if (file.size > limit) throw DiscFsException("文件太大（${file.size} 字节）")
     val out = ByteArray(file.size.toInt())
-    val reader = open(file)
+    val reader = open(file, cached = file.size <= SMALL_FILE)
     var pos = 0
     while (pos < out.size) {
         val n = reader.read(pos.toLong(), out, pos, out.size - pos)
@@ -65,8 +69,19 @@ suspend fun DiscFileSystem.readAll(file: DiscEntry, limit: Int = 16 shl 20): Byt
     return out
 }
 
-/** 按文件内偏移读取：找到偏移所在的 [DataRun]，读需要的整扇区（每条命令最多 [maxSectors] 个），再拷出要的字节。 */
-class DiscFileReader(private val src: SectorSource, val size: Long, private val runs: List<DataRun>, private val maxSectors: Int = 64) {
+private const val SMALL_FILE = 256L * 1024
+
+/**
+ * 按文件内偏移读取：找到偏移所在的 [DataRun]，读需要的整扇区（每条命令最多 [maxSectors] 个），再拷出要的字节。
+ * [cache] 不为 null 时逐扇区经缓存读（见 [DiscFileSystem.open] 的 cached）。
+ */
+class DiscFileReader(
+    private val src: SectorSource,
+    val size: Long,
+    private val runs: List<DataRun>,
+    private val maxSectors: Int = 64,
+    private val cache: CachedSectorSource? = null,
+) {
     private val buf = ByteArray(maxSectors * SECTOR_SIZE)
 
     /** 从 [position] 读最多 [len] 字节，返回实际读到的字节数；到文件末尾返回 -1。读不出抛 [SectorReadException]。 */
@@ -84,7 +99,11 @@ class DiscFileReader(private val src: SectorSource, val size: Long, private val 
         val first = sector + inRun / SECTOR_SIZE
         val skip = (inRun % SECTOR_SIZE).toInt()
         val count = minOf(((skip + want + SECTOR_SIZE - 1) / SECTOR_SIZE).toLong(), maxSectors.toLong()).toInt()
-        src.read(first, count, buf, 0)
+        if (cache != null) {
+            for (i in 0 until count) System.arraycopy(cache.sector(first + i), 0, buf, i * SECTOR_SIZE, SECTOR_SIZE)
+        } else {
+            src.read(first, count, buf, 0)
+        }
         val n = minOf(want, count * SECTOR_SIZE - skip)
         System.arraycopy(buf, skip, dst, off, n)
         return n

@@ -237,7 +237,8 @@ class IsoFileSystem private constructor(
         return out
     }
 
-    override suspend fun open(file: DiscEntry): DiscFileReader = DiscFileReader(src, file.size, runs(file))
+    override suspend fun open(file: DiscEntry, cached: Boolean): DiscFileReader =
+        DiscFileReader(src, file.size, runs(file), cache = if (cached) src else null)
 
     private fun displayName(raw: ByteArray, isDir: Boolean): String {
         var name = if (vd.isJoliet) DiscText.ucs2(raw, 0, raw.size) else DiscText.decode(raw)

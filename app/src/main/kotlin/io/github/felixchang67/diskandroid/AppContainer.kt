@@ -22,6 +22,7 @@ import io.github.felixchang67.diskandroid.rip.RipController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -74,6 +75,9 @@ class AppContainer(val app: Application) {
     fun start() {
         log.i(LogTags.APP, "DiskAndroid 启动", "会话" to sessionId, "日志目录" to logDir.absolutePath)
         SystemInfo.lines(app).forEach { log.i(LogTags.APP, it) }
+        mainScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            io.github.felixchang67.diskandroid.diag.Decoders.lines().forEach { log.i("CODEC", it) }
+        }
         ExitReasons.logRecent(app, log)
         previousSessionIssues = runCatching { PreviousSession.extract(logDir, sessionId) }.getOrNull()
         usbMonitor.start()

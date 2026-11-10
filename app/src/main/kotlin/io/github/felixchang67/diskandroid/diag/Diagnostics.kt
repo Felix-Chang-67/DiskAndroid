@@ -65,6 +65,16 @@ object Diagnostics {
             line()
         }
 
+        container.files.states.value.values.mapNotNull { it.video?.info }.forEach { v ->
+            line("===== 视频盘 =====")
+            v.describeLines().forEach { line(it) }
+            line()
+        }
+
+        line("===== 解码器（播放 DVD / BD 用）=====")
+        Decoders.lines().forEach { line(it) }
+        line()
+
         container.metadata.describeLines().takeIf { it.isNotEmpty() }?.let { lines ->
             line("===== 在线曲目信息 =====")
             lines.forEach { line(it) }

@@ -1,0 +1,7 @@
+Main title: 1
+index:   1 duration: 01:35:00 chapters:  12 angles:  1 clips:   2 (playlist: 00003.mpls) V:1 A:2  PG:1  IG:0  SV:0 SA:0
+	AUD: jpn jpn 
+	PG : jpn 
+index:   2 duration: 00:10:00 chapters:   2 angles:  1 clips:   1 (playlist: 00001.mpls) V:1 A:1  PG:0  IG:0  SV:0 SA:0
+	AUD: jpn 
+index:   3 duration: 00:00:30 chapters:   1 angles:  1 clips:   1 (playlist: 00099.mpls) V:1 A:0  PG:0  IG:0  SV:0 SA:0

@@ -507,7 +507,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | N1.5 | 音乐 CD：切歌、暂停、拖动；划痕盘；播放中弹盘；播放中拔线 | 日本音乐 CD（带 CD-TEXT 更好；早期带预加重的盘、CCCD、加强版 CD 如有） | 曲名是否正确 + 听感（杂音 / 爆音 / 卡顿）+ 日志 |
 | N1.6 | 插盘自动播放；关闭自动播放；（可选）拔掉扩展坞电源复现掉线 | — | 提示是否出现 + 日志 |
 | N2.1 | 浏览各类数据盘，复制一个文件 / 文件夹；再读一次 N1.6 的 DVD+RW | 日文文件名的 CD-R / DVD、UDF DVD、BD、加强版 CD、Windows"类似于 USB 闪存驱动器"方式刻的盘（如有） | 目录是否正确 + 日志 |
-| N2.2 | 查看主片识别结果 | 自制 DVD-Video、自制 BDMV / AVCHD | 候选列表截图 |
+| N2.2 | 查看主片识别结果，挑错时手动改选 | 演唱会 DVD / BD（加密的也行）、自制 DVD-Video、AVCHD | 主片对不对（不对的话正确的是哪个）+ 日志 |
 | N2.3 | DVD 起播、拖动、切音轨 | 自制 DVD-Video | 起播 / 拖动耗时、解码器列表日志 |
 | N2.4 | BD 起播、拖动 | 自制 BDMV | 同上 |
 | N2.5 | 三类盘的插盘自动行为 | 音乐 CD / DVD / 数据盘 | 是否符合规则 |
@@ -551,7 +551,7 @@ N4.x + N1.5 → N5.1 / N5.2
 |---|---|---|
 | 1 | 构建与安装 | 你暂时没有电脑 → 全部在云端构建；APK 通过对话发送；测试签名放在仓库里，可直接覆盖安装 |
 | 2 | 许可证 | 推迟到 P2 第一次链接 GPL 库（libdvdread）时再加 LICENSE，届时再跟你确认（默认 GPL-3.0-or-later） |
-| 3 | P2 解析方式 | 文件浏览（ISO 9660 / Joliet / Rock Ridge / UDF）改为 Kotlin 自写的 `core:fs`（见 #10）；DVD / BD 的结构解析与播放仍用 libdvdread / libbluray（N2.2 起） |
+| 3 | P2 解析方式 | 文件浏览（ISO 9660 / Joliet / Rock Ridge / UDF）用 Kotlin 自写的 `core:fs`（见 #10）。N2.2 的标题识别（DVD 的 IFO、BD / AVCHD 的播放列表）也用 Kotlin 写在 `core:video`，测试里用 lsdvd（libdvdread）和 bd_list_titles（libbluray）的输出逐项核对，挑主片的规则移植自 libbluray。解密（阶段 3）按你的要求用 libdvdcss / libaacs，不自己实现加密算法；N2.3 / N2.4 播放时读流是走 libdvdread / libbluray 还是由 `core:video` 按单元 / 播放项直接读，到 N2.3 按实际效果决定（两种都能接上解密库） |
 | 4 | 阶段顺序 | P3（加密盘）在 P4（刻录）之前，按你原定顺序 |
 | 5 | 解密组件产出 | 你没有电脑编译 → 由我在容器里**单独**编译成独立 .so 文件，**不进 APK**，在对话里单独发给你，你在 App 里用"导入组件"导入 |
 | 6 | 默认分支 | 仓库原本为空，`claude/jolly-tesla-c2qlm6` 已成为默认分支；以后想改成 `main` 告诉我 |
@@ -567,7 +567,8 @@ N4.x + N1.5 → N5.1 / N5.2
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
 | 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
 | 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | ✅ 真机通过（见 7.5） |
-| 2026-11-10 | N2.1 | 0.7.0-N2.1（versionCode 8） | 盘上的文件：新模块 `core:fs`（纯 Kotlin）读 ISO 9660 / Joliet / Rock Ridge（含 CE 续接、深层目录重定位、超过 4 GB 的多区段文件）和 UDF 1.02–2.60（物理分区、元数据分区、备用表、VAT + 策略 4096），多区段 CD 读最后一个区段；文字解码 UTF-8 → Shift-JIS → GBK，截断在多字节字符中间也能解；元数据读取按 16 扇区预读并缓存。识别 DVD-Video / DVD-Audio / DVD-VR / BDMV / BDAV / AVCHD / VCD / SVCD 和 AACS 文件夹。界面逐级浏览（日文文件名），复制单个文件 / 文件夹 / 整张盘到保存位置（读不出的扇区重试 3 次后补零并列出；CSS / CPRM / AACS / VCD 不提供）。读成 ISO：卷标改用 UDF / Joliet / 正确解码的 ISO 卷标（修 N1.6 的 9 个下划线）；**可重写盘（DVD+RW、DVD-RW 限制性覆写、DVD-RAM、BD-RE）只读到文件系统结尾**（可改回整张盘）；报告写上文件系统详情和中途的复位次数 | 等待真机测试 |
+| 2026-11-10 | N2.2 | 0.8.0-N2.2（versionCode 9） | 视频盘的标题识别：新模块 `core:video`（纯 Kotlin）。DVD：读 VIDEO_TS.IFO 和各 VTS_nn_0.IFO（坏了用 .BUP），列出每个标题的时长、章节、单元（扇区范围留给播放用）、角度、视频属性、音轨（格式、语言、声道、流号）和字幕；时长 / 章节算法与 lsdvd 一致。BD / AVCHD：读全部 .mpls，列出时长、章节、剪辑、视频 / 音频 / 字幕流，按 libbluray 的规则过滤重复和循环的播放列表、挑主片。主片可以手动改选。IFO 和播放列表不加密，CSS / AACS 盘也能看标题列表。启动时列出这台平板的 MediaCodec 解码器（MPEG-2、AVC、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD…），写进日志和诊断信息，"视频内容"里标出选中标题缺哪些解码器。修 N2.1 真机发现的卷标乱码：UDF 8 位字符串和 ISO 9660 字段里的 GBK / Shift-JIS / EUC-JP 按"像不像正常文字"打分识别（DVDFab 写的「ヒトリエ」以前显示成「¥Ò¥È¥ê¥¨」）；元数据小文件经缓存读（BD 的几百个播放列表不用一个个寻道）；目录浏览和复制被拒也写日志 | 等待真机测试 |
+| 2026-11-10 | N2.1 | 0.7.0-N2.1（versionCode 8） | 盘上的文件：新模块 `core:fs`（纯 Kotlin）读 ISO 9660 / Joliet / Rock Ridge（含 CE 续接、深层目录重定位、超过 4 GB 的多区段文件）和 UDF 1.02–2.60（物理分区、元数据分区、备用表、VAT + 策略 4096），多区段 CD 读最后一个区段；文字解码 UTF-8 → Shift-JIS → GBK，截断在多字节字符中间也能解；元数据读取按 16 扇区预读并缓存。识别 DVD-Video / DVD-Audio / DVD-VR / BDMV / BDAV / AVCHD / VCD / SVCD 和 AACS 文件夹。界面逐级浏览（日文文件名），复制单个文件 / 文件夹 / 整张盘到保存位置（读不出的扇区重试 3 次后补零并列出；CSS / CPRM / AACS / VCD 不提供）。读成 ISO：卷标改用 UDF / Joliet / 正确解码的 ISO 卷标（修 N1.6 的 9 个下划线）；**可重写盘（DVD+RW、DVD-RW 限制性覆写、DVD-RAM、BD-RE）只读到文件系统结尾**（可改回整张盘）；报告写上文件系统详情和中途的复位次数 | ✅ 真机通过（见 7.12，UDF 卷标乱码 0.8.0 已修） |
 | 2026-11-10 | N1.6（补充） | 0.6.1-N1.6（versionCode 7） | 你要求的 gapless 切歌：自然播到下一首本来就是采样级连续，现在两首都带预加重时去加重滤波器也不在交界处清零；播放中手动切歌（下一首 / 上一首 / 点曲目 / 拖动）不再"停下 → 清空 → 等光驱 → 再播"，而是旧的声音一直播到新位置的数据就绪再直接接上（接缝只做 10 ms 平滑防"啪"声，没有静音、没有长交叉淡化）；缓冲满时趁光驱空闲预读下一首开头约 2.6 秒，按"下一首"不用等寻道；输出缓冲从 0.5 秒减到 0.2 秒，切歌响应更快 | ✅ 真机通过（见 7.10） |
 | 2026-11-10 | N1.4 + N1.6 | 0.6.0-N1.6（versionCode 6） | 读成 ISO：READ(10)（对照 Linux sr.c）；镜像覆盖 LBA 0 到 READ CAPACITY，音轨 / 轨道与区段之间的空隙补零；两遍读取（第 1 遍大块、遇错跳过，第 2 遍逐扇区重试，补读回来的写回原位）；CD 轨道末尾读不出的 2 个 run-out 扇区算间隙；输出 .iso + .log 报告（含 ISO 9660 卷标 / 卷大小核对、MD5 / SHA-1 / CRC32）+ ddrescue 格式 .mapfile；SAF 选目录并持久授权、检查剩余空间、4 GB 写入失败提示 FAT32；前台服务 connectedDevice + 唤醒锁、通知栏进度与取消；取消 / 取盘 / 断开时保留已读部分并在 mapfile 标出；CSS 加密 DVD 拒绝并说明（需阶段 3 认证），意外遇到 05/6F 立即停止；读盘与播放互斥。整合：新放入的音乐 CD 显示"2 秒后播放"（取消 / 立即播放，可关闭），自动播放 1 秒淡入、手动点歌 30 ms 淡入；读不出的扇区静音前后各 5 ms 淡出 / 淡入；播放、读盘或起转时 USB 断开提示检查供电；日志补充识别结果、歌词、封面 | ✅ 真机通过（见 7.10） |
 | 2026-11-10 | N1.5b | 0.5.0-N1.5b（versionCode 5） | 修 N1.5 真机发现的读盘卡顿（批量传输按 16 KB 分块、JNI 直接取 errno、ENOMEM 原地重试、非 STALL 错误直接复位而不是误读 CSW；复位后重读整块而不是静音；播放缓冲加到约 10 秒）；在线识别：MusicBrainz 光盘 ID（与 libdiscid 测试向量一致）/ TOC 模糊匹配 / 盘上条码（READ SUB-CHANNEL MCN），网易云音乐补中文译名、歌曲 ID、封面，歌词取网易云（含中文翻译）、LRCLIB 备选；候选切换与手动搜索；本机缓存；通知栏 / 锁屏显示在线曲名与封面 | ✅ 真机通过（见 7.9） |
@@ -687,3 +688,17 @@ N4.x + N1.5 → N5.1 / N5.2
   - 文件项 / 扩展文件项、short / long / ext_ad、分配扩展描述符、嵌入数据、策略 4096 的间接项。
 - **文件系统结尾**（只对可重写盘）：取 ISO 9660 卷大小与 UDF 各结构结尾（分区、卷描述符序列、完整性序列、锚点）的最大值，再往后 512 个扇区内找结尾锚点（以及它之后 256 扇区处的另一个）。
 - **测试镜像**：`core/fs/src/test/fixtures/make_fixtures.sh` 用 genisoimage（Joliet + Rock Ridge、UDF 1.02 桥接）、pycdlib（UDF + Joliet，日文名）、mkudffs（BD-R VAT、CD-R VAT、DVD-RW 备用表）生成；mkudffs 做不了不带 VAT 的 UDF 2.50 元数据分区，这一种按规范手工拼（`TestImages.kt`）。
+
+### 7.12 N2.1 真机结果（2026-11-10，会话 session-20261110-193644，版本 0.7.0）
+
+- **商业 DVD**（CSS 加密，地区 2）：识别为 DVD-Video，UDF 1.02 + ISO 9660，卷标 DVD_VIDEO；读文件系统 4 条命令、0.7 秒。
+- **上次那张 DVD+RW**：文件系统结尾在扇区 295 040（整张盘 2 295 104）→ 读成 ISO 只读了 604 MB，**用时 1 分 59 秒**（上次 11 分 42 秒），0 坏扇区、0 超时、0 复位，MD5 a3dfe40d…。这次提速时没有卡顿。
+  - 制作程序是 DVDFab（中文 Windows 版）：ISO 9660 卷标解出了「ヒトリエ LIVE AT LIQUIDROOM EXTR」，但 **UDF 卷标显示成「¥Ò¥È¥ê¥¨ LIVE at LIQUIDROOM Extra Video」**，镜像文件名也用了它。原因：DVDFab 把 GBK 字节直接放进 UDF 的 8 位字符串（规范要求是 Latin-1）。0.8.0 已修（见 7.2）。
+- **音乐 CD**：『魔法少女ノ魔女裁判』原声带（22 轨），MusicBrainz 精确匹配 + 网易云 22/22 时长吻合，歌词、封面都有；自动播放、无缝切换正常，756 条 READ CD 零重试。
+- 日志里没有复制文件的记录；0.8.0 起打开目录也会写日志，方便确认浏览过哪些目录。
+
+### 7.13 `core:video` 说明（N2.2）
+
+- **DVD**：VMGI 的标题表（每个标题的标题集、VTS 内标题号、角度数、标题集起始扇区）→ 各 VTSI 的章节表（PGC 号 + 节目号）、节目链（播放时间、节目入口单元、单元的播放时间和扇区、音轨 / 字幕控制字）、视频 / 音频 / 字幕属性。标题时长 = 用到的节目链时长之和；章节时长 = 节目覆盖的单元之和（多角度块只算第一个角度）。音轨流号按节目链的音轨控制字算（lsdvd 直接用序号，第 2 条起会算错，测试里用 ffprobe 核对过）。主片：最长的；差不到 1 秒的几个里优先单元按扇区顺序排列的（结构保护的假标题常把单元打乱），再按标题号。
+- **BD / AVCHD**：播放项（剪辑、入点 / 出点、角度、连接条件）、STN 表（主视频、音频、PG / PiP PG、IG、副音频、副视频、杜比视界）、标记（章节入口）。过滤：同一段剪辑出现 3 次以上的（反盗版的循环播放列表）、与已保留的完全相同的。主片：都超过 30 分钟时依次比章节数（一方不到 2 章且相差超过 5）、分辨率、编码、无损音轨，然后比时长、音轨 / 字幕数——与 libbluray 的 `_pl_guess_main_title` 相同（libbluray 判断无损音轨时误用了声道字段，这里按编码类型）。
+- **测试盘**：`core/video/src/test/fixtures/make_fixtures.sh` 用 ffmpeg + dvdauthor 做三个标题集的 DVD（PAL / NTSC、AC-3 / MP2 / LPCM、多章节、同一 VOB 接两次），保存 lsdvd 的输出；BD 按规范拼（`make_bd_fixture.py`：95 分钟主片、特典、循环播放列表、重复播放列表、菜单），保存 bd_list_titles 的输出。视频数据清零，两个镜像压缩后一共 15 KB。

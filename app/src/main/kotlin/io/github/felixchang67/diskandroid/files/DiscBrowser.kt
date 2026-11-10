@@ -8,6 +8,7 @@ import io.github.felixchang67.diskandroid.core.drive.DiscInfo
 import io.github.felixchang67.diskandroid.core.drive.DriveSession
 import io.github.felixchang67.diskandroid.core.fs.CachedSectorSource
 import io.github.felixchang67.diskandroid.core.fs.ContentDetector
+import io.github.felixchang67.diskandroid.core.fs.ContentKind
 import io.github.felixchang67.diskandroid.core.fs.DiscContent
 import io.github.felixchang67.diskandroid.core.fs.DiscEntry
 import io.github.felixchang67.diskandroid.core.fs.DiscFileSystem
@@ -21,6 +22,9 @@ import io.github.felixchang67.diskandroid.core.fs.SectorReadException
 import io.github.felixchang67.diskandroid.core.log.DiskLog
 import io.github.felixchang67.diskandroid.core.mmc.MmcNames
 import io.github.felixchang67.diskandroid.core.rip.RipPlan
+import io.github.felixchang67.diskandroid.core.video.VideoAnalyzer
+import io.github.felixchang67.diskandroid.core.video.VideoDiscInfo
+import io.github.felixchang67.diskandroid.core.video.VideoTitle
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
 import io.github.felixchang67.diskandroid.rip.OutputFolder
 import io.github.felixchang67.diskandroid.rip.RipService
@@ -70,7 +74,20 @@ class DiscBrowser(
         val entries: List<DiscEntry>? = null,
         val listing: Boolean = false,
         val listError: String? = null,
+        /** 视频盘（DVD-Video / BDMV / AVCHD）的标题列表；不是视频盘为 null。 */
+        val video: VideoState? = null,
     )
+
+    data class VideoState(
+        val loading: Boolean = true,
+        val info: VideoDiscInfo? = null,
+        val error: String? = null,
+        /** 用户手动选的标题（[VideoTitle.id]），null = 用自动挑的主片。 */
+        val selected: String? = null,
+        val millis: Long = 0,
+    ) {
+        val chosen: VideoTitle? get() = info?.let { i -> selected?.let { id -> i.titles.firstOrNull { it.id == id } } ?: i.main }
+    }
 
     data class CopyState(
         val running: Boolean,
@@ -132,6 +149,10 @@ class DiscBrowser(
             }
             val fs = info?.fs ?: return@launch
             openDirectory(session, fp, listOf(fs.root))
+            val content = info.content
+            if (content != null && content.kinds.any { it == ContentKind.DVD_VIDEO || it == ContentKind.BDMV || it == ContentKind.AVCHD }) {
+                analyzeVideo(session, fp, fs, content)
+            }
         }
     }
 
@@ -203,6 +224,35 @@ class DiscBrowser(
             disc.capacity?.let { add(it.lastLba) }
         }.filter { it > 0 }.distinct()
         return ProbeOptions(sessionStart = start, lastWritten = written)
+    }
+
+    // ---------------- 视频结构 ----------------
+
+    /** 读 IFO / 播放列表，列出标题、挑主片（IFO 和 .mpls 都不加密，CSS / AACS 盘也能读）。 */
+    private fun analyzeVideo(session: DriveSession, fp: String, fs: DiscFileSystem, content: DiscContent) {
+        _states.update { m -> m[session]?.takeIf { it.fingerprint == fp }?.let { m + (session to it.copy(video = VideoState())) } ?: m }
+        scope.launch {
+            val t0 = System.currentTimeMillis()
+            val result = withContext(Dispatchers.IO) { runCatching { VideoAnalyzer.analyze(fs, content) } }
+            val ms = System.currentTimeMillis() - t0
+            result.onSuccess { v -> v?.describeLines()?.forEach { log.i(VIDEO_TAG, it) } ?: log.i(VIDEO_TAG, "没有可识别的视频结构") }
+            result.onFailure { log.w(VIDEO_TAG, "读视频结构失败：${it.message}") }
+            log.i(VIDEO_TAG, "读视频结构用时 $ms ms")
+            _states.update { m ->
+                val s = m[session]?.takeIf { it.fingerprint == fp } ?: return@update m
+                m + (session to s.copy(video = VideoState(loading = false, info = result.getOrNull(), error = result.exceptionOrNull()?.message, millis = ms)))
+            }
+        }
+    }
+
+    /** 手动选一个标题（null = 回到自动挑的主片）。 */
+    fun selectTitle(session: DriveSession, id: String?) {
+        _states.update { m ->
+            val s = m[session] ?: return@update m
+            val v = s.video ?: return@update m
+            log.i(VIDEO_TAG, if (id == null) "改回自动挑的主片" else "手动选择标题：$id")
+            m + (session to s.copy(video = v.copy(selected = id)))
+        }
     }
 
     // ---------------- 目录 ----------------
@@ -410,6 +460,7 @@ class DiscBrowser(
 
     companion object {
         const val TAG = "FS"
+        const val VIDEO_TAG = "VIDEO"
         private const val CHUNK = 64 * SECTOR_SIZE
         private const val RETRIES = 3
     }
