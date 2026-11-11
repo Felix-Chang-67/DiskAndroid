@@ -310,8 +310,13 @@ class BdDisc(
     /** 剪辑号 → .m2ts 文件大小。 */
     val clipSizes: Map<String, Long>,
     val warnings: List<String>,
+    /** index.bdmv 的版本（100 / 200 / 300），读不出为 null。300 = Ultra HD Blu-ray。 */
+    val indexVersion: Int? = null,
 ) {
     fun sizeOf(pl: BdPlaylist): Long? = pl.clips.distinct().map { clipSizes[it] ?: return null }.sum()
+
+    /** Ultra HD Blu-ray（4K）：index.bdmv 版本 0300，加密的话是 AACS 2.0。 */
+    val uhd: Boolean get() = (indexVersion ?: 0) >= 300
 }
 
 object BdmvReader {
@@ -338,6 +343,26 @@ object BdmvReader {
             }
         }
         val (titles, filtered) = BdTitles.filter(playlists)
-        return BdDisc(avchd, playlists.sortedBy { it.name }, titles, filtered, BdTitles.main(titles), sizes, warnings)
+        return BdDisc(avchd, playlists.sortedBy { it.name }, titles, filtered, BdTitles.main(titles), sizes, warnings, indexVersion(fs, root))
+    }
+
+    /** index.bdmv（AVCHD 是 INDEX.BDM）开头的 "INDX0200" 之类 → 200。 */
+    private suspend fun indexVersion(fs: DiscFileSystem, root: String): Int? {
+        val f = fs.find("$root/index.bdmv") ?: fs.find("$root/INDEX.BDM") ?: return null
+        return try {
+            val head = ByteArray(8)
+            val n = fs.open(f, cached = true).read(0, head, 0, head.size)
+            parseIndexVersion(head.copyOf(n.coerceAtLeast(0)))
+        } catch (e: SectorReadException) {
+            if (e.fatal) throw e
+            null
+        } catch (e: java.io.IOException) {
+            null
+        }
+    }
+
+    fun parseIndexVersion(head: ByteArray): Int? {
+        if (head.size < 8 || String(head, 0, 4, Charsets.ISO_8859_1) != "INDX") return null
+        return String(head, 4, 4, Charsets.ISO_8859_1).toIntOrNull()
     }
 }

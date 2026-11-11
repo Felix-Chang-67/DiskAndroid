@@ -25,6 +25,7 @@ import io.github.felixchang67.diskandroid.core.player.DiscPlayer
 import io.github.felixchang67.diskandroid.core.player.NativeBridge
 import io.github.felixchang67.diskandroid.core.player.PlayerListener
 import io.github.felixchang67.diskandroid.core.video.Languages
+import io.github.felixchang67.diskandroid.core.video.VideoDiscInfo
 import io.github.felixchang67.diskandroid.core.video.formatDuration
 import io.github.felixchang67.diskandroid.files.DiscBrowser
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
@@ -185,13 +186,14 @@ class VideoPlaybackController(
         else -> null
     }
 
-    /** 不能播放这张盘的原因（null = 可以）。 */
-    fun refusal(disc: DiscInfo, content: DiscContent?): String? {
+    /** 不能播放这张盘的原因（null = 可以）。[video] 是读出来的视频结构（有的话能提前认出 4K UHD）。 */
+    fun refusal(disc: DiscInfo, content: DiscContent?, video: VideoDiscInfo? = null): String? {
         val kind = videoKind(content)
         return when {
             disc.dvdCopyright?.isCss == true && decrypt.file(DecryptComponents.Kind.CSS) == null -> PROTECTED_MESSAGE
             disc.dvdCopyright?.protectionType == 0x02 -> "这张盘有 CPRM 保护（数字电视录像），暂不支持播放"
             content != null && kind == null -> "这张盘上没有视频（VIDEO_TS / BDMV）"
+            kind == DiscPlayer.Kind.BLURAY && content?.aacs == true && video?.bd?.uhd == true -> AACS2_MESSAGE
             kind == DiscPlayer.Kind.BLURAY && content?.aacs == true -> aacsMissing()
             else -> null
         } ?: nativeProblem()
@@ -274,7 +276,7 @@ class VideoPlaybackController(
     fun playBluray(session: DriveSession, disc: DiscInfo, startPlaylist: Int, label: String?, why: String): String? {
         cancelAutoplay(log = false)
         val content = files.states.value[session]?.info?.content
-        refusal(disc, content)?.let {
+        refusal(disc, content, files.states.value[session]?.video?.info)?.let {
             log.i(TAG, "不播放：$it")
             return it
         }
@@ -311,8 +313,31 @@ class VideoPlaybackController(
         return null
     }
 
-    /** 启用蓝光解密组件（libaacs）。返回给用户看的错误，null = 成功。阶段 3 的 AACS 部分实现。 */
-    private fun attachAacs(): String? = aacsMissing()
+    /**
+     * 启用蓝光解密组件（libaacs）：把宿主接口交给它（认证命令经光驱会话发出），告诉 libbluray 用它，
+     * KEYDB.cfg 在 [DecryptComponents.aacsConfigHome]，算出的密钥缓存在 [DecryptComponents.aacsCacheDir]。
+     * 返回给用户看的错误，null = 成功。
+     */
+    private fun attachAacs(): String? {
+        aacsMissing()?.let { return it }
+        val component = decrypt.file(DecryptComponents.Kind.AACS) ?: return PROTECTED_MESSAGE
+        val problem = NativeBridge.nativeAttachAacs(component.path, decrypt.aacsConfigHome.path, decrypt.aacsCacheDir.path)
+        if (problem != null) {
+            log.w(TAG, "蓝光解密组件加载失败：$problem")
+            return "蓝光解密组件加载失败：$problem"
+        }
+        return null
+    }
+
+    /** 蓝光打不开时给用户的说明：光驱认证失败的，补上光驱返回的 sense（原文在日志的 SCSI 标签里）。 */
+    private fun blurayReason(c: Current, msg: String): String {
+        val sense = c.reader.lastAuthSense
+        return if (c.aacs && msg.startsWith(DRIVE_AUTH_MESSAGE) && sense != null) {
+            "$msg\n光驱返回：${sense.describe()}（sense ${sense.code()}；完整记录在日志的 SCSI 和 AACS 标签里）"
+        } else {
+            msg
+        }
+    }
 
     /** 打开播放器（IO 线程）、接上画面、开始播放。 */
     private fun launch(c: Current, title: String, notice: String?, titleInfo: Map<Int, String>, open: () -> DiscPlayer) {
@@ -329,7 +354,15 @@ class VideoPlaybackController(
             if (player == null) {
                 val msg = result.exceptionOrNull()?.message ?: "打不开"
                 log.w(TAG, "打开失败：$msg")
-                fail(c, if (c.reader.protectedHit) protectedReason(c) else c.reader.fatalReason ?: msg)
+                fail(
+                    c,
+                    when {
+                        c.reader.protectedHit -> protectedReason(c)
+                        c.reader.fatalReason != null -> c.reader.fatalReason!!
+                        c.kind == DiscPlayer.Kind.BLURAY -> blurayReason(c, msg)
+                        else -> msg
+                    },
+                )
                 return@launch
             }
             c.player = player
@@ -760,6 +793,10 @@ class VideoPlaybackController(
     companion object {
         const val TAG = "VIDEO"
         const val PROTECTED_MESSAGE = "该盘有版权保护，需要启用解密组件"
+        const val AACS2_MESSAGE = "不支持 AACS 2.0（4K UHD 蓝光）"
+
+        /** 光驱拒绝 AACS 认证时原生层给的说明的开头（dp_bd.c）。 */
+        const val DRIVE_AUTH_MESSAGE = "该光驱不支持此盘的认证"
         const val AUTOPLAY_DELAY_MS = 2_000L
         private const val POLL_MS = 250L
     }

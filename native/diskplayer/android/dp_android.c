@@ -223,6 +223,10 @@ static dc_host_api g_css_host = {DC_HOST_API_VERSION, (void *)"CSS", host_scsi, 
 static void *g_css_lib;
 static char g_css_path[512];
 
+static dc_host_api g_aacs_host = {DC_HOST_API_VERSION, (void *)"AACS", host_scsi, host_log};
+static void *g_aacs_lib;
+static char g_aacs_path[512];
+
 /* ---------------- OpenGL ES 3 视频输出 ---------------- */
 
 static const char *VS =
@@ -966,6 +970,75 @@ JNIEXPORT jstring JNICALL JFN(nativeAttachCss)(JNIEnv *env, jclass cls, jstring 
     (*env)->ReleaseStringUTFChars(env, jpath, path);
     (*env)->ReleaseStringUTFChars(env, jcache, cache);
     return msg[0] ? (*env)->NewStringUTF(env, msg) : NULL;
+}
+
+/*
+ * 启用 AACS 解密组件（打过补丁的 libaacs）：加载、把宿主接口交给它，并让 libbluray 用它。
+ * libbluray 按 LIBAACS_PATH 加载：它会在后面加 ".so.0"，所以组件文件名必须以 ".so.0" 结尾，LIBAACS_PATH 是去掉这个后缀的路径
+ * （和这里加载的是同一个文件，拿到的是同一份已加载的库）。
+ * [config] 下面的 aacs/KEYDB.cfg 是用户导入的密钥库（XDG_CONFIG_HOME）；[cache] 是 libaacs 的密钥缓存（XDG_CACHE_HOME）。
+ * 返回 null 表示成功，否则是原因。
+ */
+JNIEXPORT jstring JNICALL JFN(nativeAttachAacs)(JNIEnv *env, jclass cls, jstring jpath, jstring jconfig, jstring jcache) {
+    (void)cls;
+    dp_log_set(log_to_java, NULL);
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    const char *config = (*env)->GetStringUTFChars(env, jconfig, NULL);
+    const char *cache = (*env)->GetStringUTFChars(env, jcache, NULL);
+    char msg[512] = "";
+    size_t n = strlen(path);
+    if (n < 6 || strcmp(path + n - 5, ".so.0") != 0 || n >= sizeof(g_aacs_path)) {
+        snprintf(msg, sizeof(msg), "组件文件名不对（要以 .so.0 结尾）：%s", path);
+    } else if (!g_aacs_lib || strcmp(g_aacs_path, path) != 0) {
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!h) {
+            const char *e = dlerror();
+            snprintf(msg, sizeof(msg), "加载失败：%s", e ? e : "未知原因");
+        } else {
+            if (g_aacs_lib) {
+                /* 换了组件：旧的那份不再用光驱（不卸载，libbluray 可能还拿着它） */
+                int (*old_set)(const dc_host_api *) = (int (*)(const dc_host_api *))dlsym(g_aacs_lib, "aacs_set_host");
+                if (old_set) old_set(NULL);
+            }
+            g_aacs_lib = h;
+            snprintf(g_aacs_path, sizeof(g_aacs_path), "%s", path);
+        }
+    }
+    if (!msg[0]) {
+        int (*set_host)(const dc_host_api *) = (int (*)(const dc_host_api *))dlsym(g_aacs_lib, "aacs_set_host");
+        if (!set_host) {
+            snprintf(msg, sizeof(msg), "缺少 aacs_set_host（不是给 DiskAndroid 编的版本）");
+        } else {
+            int v = set_host(&g_aacs_host);
+            char base[512];
+            snprintf(base, sizeof(base), "%.*s", (int)(n - 5), path);
+            /* "系统配置目录"指向一个不存在的子目录：libaacs 会把用户和系统两处的 KEYDB.cfg 都读一遍，
+             * 指向同一个目录会把几十 MB 的密钥库解析两次（它只在第一次用时读这个变量） */
+            char sysdir[600];
+            snprintf(sysdir, sizeof(sysdir), "%s/.no-system-config", config);
+            setenv("LIBAACS_PATH", base, 1);
+            setenv("XDG_CONFIG_HOME", config, 1);
+            setenv("XDG_CONFIG_DIRS", sysdir, 1);
+            setenv("XDG_CACHE_HOME", cache, 1);
+            unsetenv("AACS_HOME");
+            dp_log(DP_LOG_INFO, "AACS", "已启用蓝光解密组件（接口版本 %d）：%s", v, path);
+        }
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    (*env)->ReleaseStringUTFChars(env, jconfig, config);
+    (*env)->ReleaseStringUTFChars(env, jcache, cache);
+    return msg[0] ? (*env)->NewStringUTF(env, msg) : NULL;
+}
+
+/* 停用 AACS 解密组件（删除组件后）：libbluray 下次打开盘时找不到它。 */
+JNIEXPORT void JNICALL JFN(nativeDetachAacs)(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    unsetenv("LIBAACS_PATH");
+    if (g_aacs_lib) {
+        int (*set_host)(const dc_host_api *) = (int (*)(const dc_host_api *))dlsym(g_aacs_lib, "aacs_set_host");
+        if (set_host) set_host(NULL);
+    }
 }
 
 /* 停用 CSS 解密组件（删除组件后）：libdvdread 下次打开盘时不再加载它。 */

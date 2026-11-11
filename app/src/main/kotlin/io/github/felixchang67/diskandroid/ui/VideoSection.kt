@@ -84,7 +84,7 @@ fun VideoSection(
             info == null -> Text(v.error?.let { "读不出标题列表：$it" } ?: "没有识别出视频结构", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             else -> {
                 PlayBlock(v, info, session, disc, video, s.info?.content, onPlay)
-                Titles(v, info, session, disc, browser, playable = video.refusal(disc, s.info?.content) == null, onPlay)
+                Titles(v, info, session, disc, browser, playable = video.refusal(disc, s.info?.content, info) == null, onPlay)
             }
         }
     }
@@ -106,7 +106,7 @@ private fun PlayBlock(
     val pending by video.autoplay.collectAsStateWithLifecycle()
     val autoplay by video.autoplayEnabled.collectAsStateWithLifecycle()
     val autoStart by video.autoStart.collectAsStateWithLifecycle()
-    val refusal = video.refusal(disc, content)
+    val refusal = video.refusal(disc, content, info)
     if (info.format == VideoFormat.DVD_VIDEO) {
         val rpc = session.info.collectAsStateWithLifecycle().value?.rpc
         val region = DvdRegion.decide(rpc, disc.dvdCopyright)
@@ -197,7 +197,8 @@ private fun Titles(
     )
     val protection = when {
         disc.dvdCopyright?.isCss == true -> "CSS 加密：播放时用导入的 DVD 解密组件向光驱认证"
-        info.aacs -> "AACS 加密：播放时用导入的蓝光解密组件和 KEYDB.cfg"
+        info.aacs && info.bd?.uhd == true -> "4K Ultra HD 蓝光，AACS 2.0 加密：不支持"
+        info.aacs -> "AACS 加密：播放时用导入的蓝光解密组件和 KEYDB.cfg（KEYDB 里没有这张盘的密钥时，要向光驱认证读卷标识）"
         else -> "没有加密"
     }
     Text(protection, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

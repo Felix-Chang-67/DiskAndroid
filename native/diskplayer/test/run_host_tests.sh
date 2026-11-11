@@ -21,3 +21,16 @@ cc -std=gnu11 -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-unused-para
   -o "$OUT/dp_bd_host_test"
 "$OUT/dp_bd_host_test" "$OUT/test_bd.iso"
 
+# 蓝光解密（端到端）：要先编电脑版的解密组件（bash plugins/decrypt/build.sh host aacs）；没有就跳过
+AACS_LIB="$ROOT/../../plugins/decrypt/out/host/libaacs.so"
+if [ -f "$AACS_LIB" ]; then
+  [ -f "$OUT/aacs_bd.iso" ] || python3 "$HERE/make_bd.py" "$OUT/aacs_bd.iso" --aacs "$OUT/aacs_keydb" > "$OUT/make_aacs_bd.log" 2>&1
+  [ -f "$OUT/aacs_uhd_bd.iso" ] || python3 "$HERE/make_bd.py" "$OUT/aacs_uhd_bd.iso" --aacs "$OUT/aacs_uhd_keydb" --uhd > "$OUT/make_aacs_uhd_bd.log" 2>&1
+  cc -std=gnu11 -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-unused-parameter -I"$DEPS/include" \
+    "$ROOT/src/dp_core.c" "$ROOT/src/dp_av.c" "$ROOT/src/dp_bd.c" "$HERE/dp_bd_aacs_host_test.c" \
+    -L"$DEPS/lib" -lbluray -ludfread -lavfilter -lswscale -lswresample -lavcodec -lavutil -lpthread -lm -ldl \
+    -o "$OUT/dp_bd_aacs_host_test"
+  "$OUT/dp_bd_aacs_host_test" "$OUT/aacs_bd.iso" "$OUT/aacs_uhd_bd.iso" "$OUT/aacs_keydb" "$AACS_LIB"
+else
+  echo "（跳过蓝光解密测试：没有 $AACS_LIB）"
+fi

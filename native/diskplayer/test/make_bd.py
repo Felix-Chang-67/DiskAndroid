@@ -6,7 +6,10 @@
   - index.bdmv：First Play 和标题 1 → 电影对象 0（PlayPL 0），标题 2 → 电影对象 1（PlayPL 1）
 数据结构按 BD-ROM 规范（参照 libbluray 1.5.0 的 index_parse.c / mpls_parse.c / clpi_parse.c / mobj_parse.c），
 沿用 core/video 的 make_bd_fixture.py；剪辑没有 EP map（libbluray 会从头播到尾，不影响这个测试）。
-用法：python3 make_bd.py <输出 ISO>
+用法：python3 make_bd.py <输出 ISO> [--aacs <KEYDB 目录>] [--uhd]
+  --aacs：按 AACS 1.0 加密视频（每个 6144 字节的对齐单元：前 16 字节明文，其余 AES-128-CBC），写 AACS/Unit_Key_RO.inf、
+          CPSUnit00001.cci，并在 <KEYDB 目录>/aacs/KEYDB.cfg 写上这张盘的 VUK（给解密组件的端到端测试用）
+  --uhd： index.bdmv 写成 0300 版本（Ultra HD Blu-ray）
 """
 import json
 import os
@@ -17,6 +20,8 @@ import sys
 import tempfile
 
 out_iso = sys.argv[1]
+aacs_keydb = sys.argv[sys.argv.index("--aacs") + 1] if "--aacs" in sys.argv else None
+uhd = "--uhd" in sys.argv
 work = tempfile.mkdtemp(prefix="bdtest-")
 root = os.path.join(work, "disc")
 for d in ("BDMV/PLAYLIST", "BDMV/CLIPINF", "BDMV/STREAM", "BDMV/BACKUP"):
@@ -27,6 +32,22 @@ def u16(v): return struct.pack(">H", v)
 def u32(v): return struct.pack(">I", v)
 
 # ---------------- 流 ----------------
+UNIT = 6144  # 对齐单元：32 个 192 字节的源包
+
+def pad_aligned_units(path):
+    """补空包（PID 1FFFh）到整数个对齐单元（真盘的 .m2ts 都是这样；AACS 按单元加密）。"""
+    size = os.path.getsize(path)
+    missing = (-size) % UNIT
+    if missing == 0:
+        return
+    with open(path, "rb") as f:
+        f.seek(size - 192)
+        ats = struct.unpack(">I", f.read(4))[0] & 0x3FFFFFFF
+    null_ts = bytes([0x47, 0x1F, 0xFF, 0x10]) + bytes([0xFF]) * 184
+    with open(path, "ab") as f:
+        for i in range(missing // 192):
+            f.write(struct.pack(">I", (ats + i + 1) & 0x3FFFFFFF) + null_ts)
+
 def make_clip(name, seconds, lpcm):
     path = os.path.join(root, "BDMV/STREAM", name + ".m2ts")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -41,6 +62,7 @@ def make_clip(name, seconds, lpcm):
         cmd += ["-c:a:1", "pcm_bluray", "-ac:a:1", "2", "-metadata:s:a:1", "language=eng"]
     cmd += ["-f", "mpegts", "-mpegts_m2ts_mode", "1", path]
     subprocess.run(cmd, check=True)
+    pad_aligned_units(path)
     probe = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", path],
                                       check=True, capture_output=True, text=True).stdout)
     streams = [(int(s["id"], 16), s["codec_type"], s["codec_name"], float(s.get("start_time", "0"))) for s in probe["streams"]]
@@ -85,7 +107,7 @@ def index_bdmv(titles):
         body += u32(0x4000_0000) + hdmv_obj(mobj)
     indexes = u32(len(body)) + body
     start = 40 + len(app_info)
-    return b"INDX0200" + u32(start) + u32(0) + bytes(24) + app_info + indexes
+    return (b"INDX0300" if uhd else b"INDX0200") + u32(start) + u32(0) + bytes(24) + app_info + indexes
 
 def movie_objects(playlists):
     objs = b""
@@ -183,6 +205,59 @@ write("BDMV/index.bdmv", index_bdmv([0, 1]))
 write("BDMV/MovieObject.bdmv", movie_objects([0, 1]))
 for f in ("index.bdmv", "MovieObject.bdmv"):
     shutil.copy(os.path.join(root, "BDMV", f), os.path.join(root, "BDMV/BACKUP", f))
+
+# ---------------- AACS（测试用的密钥，不是任何真盘的） ----------------
+if aacs_keydb:
+    import hashlib
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    def aes_ecb_enc(key, block):
+        e = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+        return e.update(block) + e.finalize()
+
+    def aes_ecb_dec(key, block):
+        d = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+        return d.update(block) + d.finalize()
+
+    mk = bytes(range(0x40, 0x50))
+    vid = bytes((0x11 * i + 3) & 0xFF for i in range(16))
+    vuk = bytes(a ^ b for a, b in zip(aes_ecb_dec(mk, vid), vid))      # VUK = AES-128D(MK, VID) XOR VID
+    uk = bytes((0xA5 ^ (7 * i)) & 0xFF for i in range(16))
+    iv = bytes.fromhex("0ba0f8ddfea61fb3d8df9f566a050f78")
+    for name in ("00001", "00002"):
+        path = os.path.join(root, "BDMV/STREAM", name + ".m2ts")
+        data = bytearray(open(path, "rb").read())
+        assert len(data) % UNIT == 0
+        for off in range(0, len(data), UNIT):
+            data[off] |= 0xC0                                         # 第一个源包的 copy_permission_indicator：加密
+            head = bytes(data[off:off + 16])
+            key = bytes(a ^ b for a, b in zip(aes_ecb_enc(uk, head), head))
+            e = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+            data[off + 16:off + UNIT] = e.update(bytes(data[off + 16:off + UNIT])) + e.finalize()
+        open(path, "wb").write(data)
+    os.makedirs(os.path.join(root, "AACS"), exist_ok=True)
+    ukf = bytearray(4096)                                              # libaacs 只认 2 KB 以上
+    ukf[0:4] = u32(64)                                                 # 单元密钥块位置
+    ukf[16] = 1                                                        # 应用类型 BDMV
+    ukf[17] = 1                                                        # 1 个 BDMV 目录
+    ukf[64:66] = u16(1)                                                # 1 个 CPS 单元
+    ukf[112:128] = aes_ecb_enc(vuk, uk)                                # 加密的单元密钥
+    write("AACS/Unit_Key_RO.inf", bytes(ukf))
+    cci = bytearray(2048)
+    cci[0:2] = u16(1)
+    cci[16:22] = u16(0x0111) + u16(0x0100) + u16(0)                    # 增强标题使用规则：表示加密
+    write("AACS/CPSUnit00001.cci", bytes(cci))
+    # 最小的 MKB（libaacs 0.12.0 mkb.c 的记录格式：类型 1 字节 + 长度 3 字节（含头）+ 数据）：类型和版本（MKB 类型 3，版本 77）、
+    # 媒体密钥校验数据、一个 UV、一个 cvalue，最后 4 个 0 字节结束。KEYDB 里没有这张盘的 VUK、也没有处理密钥时，libaacs 报"没有处理密钥"
+    def rec(t, body):
+        return bytes([t]) + (len(body) + 4).to_bytes(3, "big") + body
+    mkb = rec(0x10, u32(0x00031003) + u32(77)) + rec(0x81, bytes(16)) + rec(0x04, bytes([0, 0, 0, 0, 1])) + rec(0x05, bytes(16)) + bytes(4)
+    write("AACS/MKB_RO.inf", mkb)
+    disc_id = hashlib.sha1(bytes(ukf)).hexdigest()
+    os.makedirs(os.path.join(aacs_keydb, "aacs"), exist_ok=True)
+    with open(os.path.join(aacs_keydb, "aacs", "KEYDB.cfg"), "w") as f:
+        f.write("; test disc made by make_bd.py\n")
+        f.write(f"0x{disc_id} = BD_TEST | D | 2026-11-11 | V | 0x{vuk.hex()}\n")
 
 subprocess.run(["genisoimage", "-quiet", "-udf", "-iso-level", "3", "-V", "BD_TEST", "-o", out_iso, root], check=True)
 shutil.rmtree(work)

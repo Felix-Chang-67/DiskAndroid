@@ -55,7 +55,9 @@ fun DecryptSection(decrypt: DecryptComponents, onMessage: (String) -> Unit) {
             Text("解密组件", style = MaterialTheme.typography.titleMedium)
             Text(
                 "加密的商业 DVD（CSS）和蓝光（AACS）要用解密组件才能播放。组件不随 App 提供，由你自己导入；" +
-                    "只用于边读边播，不提供解密后导出，读成 ISO 仍是原始密文。是否合法取决于你所在地的法律。",
+                    "只用于边读边播，不提供解密后导出，读成 ISO 仍是原始密文。是否合法取决于你所在地的法律。\n" +
+                    "蓝光还要你自己准备的 KEYDB.cfg：里面有这张盘的密钥（VUK）最好；没有的话要用处理密钥和主机证书向光驱认证，" +
+                    "较新的光驱可能拒绝。不支持 4K UHD 蓝光（AACS 2.0）和 BD+。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

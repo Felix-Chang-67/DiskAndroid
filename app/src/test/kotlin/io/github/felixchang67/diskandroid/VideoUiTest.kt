@@ -10,10 +10,15 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import io.github.felixchang67.diskandroid.core.drive.DriveSession
+import io.github.felixchang67.diskandroid.core.fs.ContentKind
+import io.github.felixchang67.diskandroid.core.fs.DiscContent
 import io.github.felixchang67.diskandroid.core.testing.FakeDisc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmcTransport
 import io.github.felixchang67.diskandroid.core.testing.FakeTrack
+import io.github.felixchang67.diskandroid.core.video.BdDisc
+import io.github.felixchang67.diskandroid.core.video.VideoDiscInfo
+import io.github.felixchang67.diskandroid.core.video.VideoFormat
 import io.github.felixchang67.diskandroid.ui.DiscFilesSection
 import io.github.felixchang67.diskandroid.ui.VideoSection
 import io.github.felixchang67.diskandroid.video.VideoPlaybackController
@@ -156,6 +161,47 @@ class VideoUiTest {
             assertEquals(VideoPlaybackController.PROTECTED_MESSAGE, container.video.play(session, info, 0, null, "测试"))
             assertTrue(container.ring.snapshot().any { it.message.contains("不播放：该盘有版权保护") })
             assertTrue(played.isEmpty())
+        } finally {
+            session.close()
+            scope.cancel()
+            executor.close()
+        }
+    }
+
+    /** AACS 加密的蓝光：组件、KEYDB.cfg 缺哪个说哪个；4K UHD（AACS 2.0）直接说不支持。 */
+    @Test
+    fun aacsBlurayRefusalsSayWhatIsMissing() {
+        val container = ApplicationProvider.getApplicationContext<DiskApp>().container
+        val img = GZIPInputStream(javaClass.getResourceAsStream("/fixtures/dvd_video.iso.gz")!!).use { it.readBytes() }
+        val sectors = (img.size / 2048).toLong()
+        val mmc = FakeMmc().apply {
+            insertDisc(FakeDisc(0x10, listOf(FakeTrack(1, 1, 0, sectors, audio = false)), sectors, image = img), spinUpPolls = 0)
+            pendingUnitAttention.clear()
+            pendingMediaEvents.clear()
+        }
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob())
+        val session = DriveSession(FakeMmcTransport(mmc), container.log, "测试光驱", scope, executor, pollIntervalMs = 50, becomingReadyIntervalMs = 20)
+        try {
+            session.start()
+            compose.waitUntil(10_000) {
+                idle()
+                session.disc.value != null
+            }
+            val info = session.disc.value!!
+            container.video.nativeProblem = { null }
+            val bd = DiscContent(listOf(ContentKind.BDMV), aacs = true, notes = emptyList())
+            val video = container.video
+            assertEquals("${VideoPlaybackController.PROTECTED_MESSAGE}（AACS：要导入蓝光解密组件和 KEYDB.cfg）", video.refusal(info, bd))
+            // 4K UHD：index.bdmv 0300，加密就是 AACS 2.0
+            fun disc(version: Int) = VideoDiscInfo(
+                VideoFormat.BDMV, emptyList(), null, 0, emptyList(), aacs = true,
+                bd = BdDisc(false, emptyList(), emptyList(), 0, null, emptyMap(), emptyList(), indexVersion = version),
+            )
+            assertEquals(VideoPlaybackController.AACS2_MESSAGE, video.refusal(info, bd, disc(300)))
+            assertEquals("${VideoPlaybackController.PROTECTED_MESSAGE}（AACS：要导入蓝光解密组件和 KEYDB.cfg）", video.refusal(info, bd, disc(200)))
+            // 没加密的蓝光不需要组件
+            assertEquals(null, video.refusal(info, DiscContent(listOf(ContentKind.BDMV), aacs = false, notes = emptyList())))
         } finally {
             session.close()
             scope.cancel()

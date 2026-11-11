@@ -38,6 +38,25 @@ class DecryptComponents(private val app: Application, private val log: DiskLog) 
     /** libdvdcss 的标题密钥缓存（DVDCSS_CACHE）。 */
     val cssCacheDir: File get() = File(app.cacheDir, "dvdcss").apply { mkdirs() }
 
+    /** libaacs 的密钥缓存（XDG_CACHE_HOME：它在下面建 aacs/vuk/<盘 ID> 之类）。 */
+    val aacsCacheDir: File get() = File(app.cacheDir, "aacs-cache").apply { mkdirs() }
+
+    /**
+     * 组件在私有目录里的文件名（带内容哈希：重新导入新版本时换一个路径，不用重启 App 就能加载新的）。
+     * libaacs 要以 ".so.0" 结尾：libbluray 按 LIBAACS_PATH + ".so.0" 加载它。
+     */
+    private fun fileName(kind: Kind, hash: String): String = when (kind) {
+        Kind.KEYDB -> KEYDB_NAME
+        Kind.AACS -> "libaacs-${hash.take(12)}.so.0"
+        Kind.CSS -> "libdvdcss-${hash.take(12)}.so"
+    }
+
+    private fun isComponentFile(kind: Kind, name: String): Boolean = when (kind) {
+        Kind.KEYDB -> name == KEYDB_NAME
+        Kind.AACS -> name.endsWith(".so.0")
+        Kind.CSS -> name.endsWith(".so")
+    }
+
     private fun dirFor(kind: Kind): File = when (kind) {
         Kind.KEYDB -> File(aacsConfigHome, "aacs")
         else -> File(root, kind.name.lowercase())
@@ -52,7 +71,7 @@ class DecryptComponents(private val app: Application, private val log: DiskLog) 
     fun file(kind: Kind): File? = _items.value[kind]?.file?.takeIf { it.exists() }
 
     private fun scan(): Map<Kind, Item> = Kind.entries.mapNotNull { k ->
-        val f = dirFor(k).listFiles()?.filter { it.isFile && (k == Kind.KEYDB && it.name == KEYDB_NAME || k != Kind.KEYDB && it.name.endsWith(".so")) }
+        val f = dirFor(k).listFiles()?.filter { it.isFile && isComponentFile(k, it.name) }
             ?.maxByOrNull { it.lastModified() } ?: return@mapNotNull null
         k to Item(k, f, f.length(), runCatching { sha256(f) }.getOrDefault("?"), f.lastModified())
     }.toMap()
@@ -100,8 +119,7 @@ class DecryptComponents(private val app: Application, private val log: DiskLog) 
             }
             val hash = sha256(tmp)
             val dir = dirFor(kind).apply { mkdirs() }
-            val dest = File(dir, if (kind == Kind.KEYDB) KEYDB_NAME else "lib${kind.name.lowercase()}-${hash.take(12)}.so")
-            // 同一个组件文件名带内容哈希：重新导入新版本时换一个路径，不用重启 App 就能加载新的
+            val dest = File(dir, fileName(kind, hash))
             dir.listFiles()?.forEach { old ->
                 if (old != dest) {
                     old.setWritable(true)
@@ -129,14 +147,25 @@ class DecryptComponents(private val app: Application, private val log: DiskLog) 
         }
     }
 
+    /** 删除组件。连同它缓存的密钥一起删（CSS 的标题密钥；AACS 的 VUK 等，删组件或 KEYDB.cfg 都清）。 */
     fun remove(kind: Kind) {
         dirFor(kind).listFiles()?.forEach {
             it.setWritable(true)
             it.delete()
         }
         _items.value = _items.value - kind
-        if (kind == Kind.CSS && NativeBridge.isAvailable) runCatching { NativeBridge.nativeDetachCss() }
-        log.i(TAG, "已删除${kind.label}")
+        when (kind) {
+            Kind.CSS -> {
+                if (NativeBridge.isAvailable) runCatching { NativeBridge.nativeDetachCss() }
+                cssCacheDir.deleteRecursively()
+            }
+            Kind.AACS -> {
+                if (NativeBridge.isAvailable) runCatching { NativeBridge.nativeDetachAacs() }
+                aacsCacheDir.deleteRecursively()
+            }
+            Kind.KEYDB -> aacsCacheDir.deleteRecursively()
+        }
+        log.i(TAG, "已删除${kind.label}（连同缓存的密钥）")
     }
 
     /** 64 位 ARM（AArch64）的 ELF 共享库。 */

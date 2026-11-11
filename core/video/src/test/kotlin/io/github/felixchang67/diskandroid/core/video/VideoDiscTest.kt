@@ -112,6 +112,19 @@ class VideoDiscTest {
         assertEquals(2, bonus.chapters)
         assertEquals(30_000L, info.titles[2].durationMs)
         assertEquals("MPEG-2 1080i 29.97", info.titles[2].video)
+        // index.bdmv 的版本：0200 是普通蓝光，不是 4K UHD（AACS 2.0）
+        assertEquals(200, disc.indexVersion)
+        assertFalse(disc.uhd)
+    }
+
+    @Test
+    fun indexVersionTellsUltraHdApart() {
+        fun head(s: String) = (s + "\u0000\u0000\u0000\u0000").toByteArray(Charsets.ISO_8859_1)
+        assertEquals(300, BdmvReader.parseIndexVersion(head("INDX0300")))
+        assertEquals(200, BdmvReader.parseIndexVersion(head("INDX0200")))
+        assertEquals(100, BdmvReader.parseIndexVersion(head("INDX0100")))
+        assertEquals(null, BdmvReader.parseIndexVersion(head("MOBJ0200")))
+        assertEquals(null, BdmvReader.parseIndexVersion("INDX".toByteArray()))
     }
 
     @Test

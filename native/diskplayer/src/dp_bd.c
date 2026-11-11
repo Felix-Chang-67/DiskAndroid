@@ -667,7 +667,10 @@ static void handle_event(dp_bd *d, const BD_EVENT *ev) {
             }
             break;
         case BD_EVENT_ENCRYPTED: {
-            const char *m = ev->param == BD_ERROR_BDPLUS ? "这张盘有 BD+ 保护，暂不支持" : "该盘有版权保护，需要启用解密组件（AACS）";
+            /* 打开时 AACS 已经"成功"，播放时读到的还是密文：密钥不对，或者光驱开了总线加密 */
+            const char *m = ev->param == BD_ERROR_BDPLUS ? "这张盘有 BD+ 保护（本 App 不支持 BD+）"
+                            : d->st.aacs ? "AACS 解密不对：读到的视频还是加密的（KEYDB.cfg 里这张盘的密钥可能不对）"
+                                         : "该盘有版权保护，需要启用解密组件（AACS）";
             dp_log(DP_LOG_ERROR, TAG, "%s", m);
             set_error(d, m);
             d->ended = true;
@@ -1002,6 +1005,49 @@ static void bd_log(const char *msg) {
     dp_log(DP_LOG_DEBUG, "BLURAY", "%s", buf);
 }
 
+/*
+ * libaacs 打开失败的原因 → 给用户看的说明。libbluray 把 libaacs 的错误码原样放在 aacs_error_code 里
+ * （libaacs 0.12.0 aacs.h 的 AACS_ERROR_*：-1 盘上文件坏、-2 没有 KEYDB.cfg、-3 没有处理密钥、-4 没有主机证书、
+ * -5 证书被吊销、-6 打不开光驱（光驱不支持 AACS）、-7 光驱认证出错、-8 没有设备密钥、-10 不支持的 AACS 版本）。
+ * 光驱那边的失败（-5 / -6 / -7）都说"该光驱不支持此盘的认证"，sense 原文由 App 的命令日志记录。
+ */
+static void aacs_error_text(const BLURAY_DISC_INFO *di, char *out, int len) {
+    int mkbv = di->aacs_mkbv;
+    switch (di->aacs_error_code) {
+        case -1: snprintf(out, (size_t)len, "读不出盘上的 AACS 文件（AACS 目录损坏或读盘出错）"); break;
+        case -2: snprintf(out, (size_t)len, "找不到 KEYDB.cfg 密钥库（请在\"解密组件\"里导入）"); break;
+        case -3:
+            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK），也没有能处理这张盘（MKB 版本 %d）的处理密钥", mkbv);
+            break;
+        case -4:
+            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK）；要向光驱读卷标识，但 KEYDB.cfg 里没有可用的主机证书");
+            break;
+        case -5: snprintf(out, (size_t)len, "该光驱不支持此盘的认证：光驱拒绝了 KEYDB.cfg 里的主机证书（可能已被吊销）"); break;
+        case -6: snprintf(out, (size_t)len, "该光驱不支持此盘的认证：光驱没有报告 AACS 功能"); break;
+        case -7: snprintf(out, (size_t)len, "该光驱不支持此盘的认证（AACS 认证过程出错）"); break;
+        case -8:
+            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK），也没有能处理这张盘（MKB 版本 %d）的设备密钥", mkbv);
+            break;
+        case -10: snprintf(out, (size_t)len, "不支持 AACS 2.0（4K UHD 蓝光）"); break;
+        default: snprintf(out, (size_t)len, "AACS 解密失败（错误码 %d）", di->aacs_error_code); break;
+    }
+}
+
+/* index.bdmv 的版本：0300 = Ultra HD Blu-ray（用 AACS 2.0）。读不出返回 0。 */
+static int index_version(BLURAY *bd) {
+    void *data = NULL;
+    int64_t size = 0;
+    int v = 0;
+    if (bd_read_file(bd, "BDMV/index.bdmv", &data, &size) && data && size >= 8 && memcmp(data, "INDX", 4) == 0) {
+        const char *p = (const char *)data + 4;
+        if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9' && p[2] >= '0' && p[2] <= '9' && p[3] >= '0' && p[3] <= '9') {
+            v = (p[0] - '0') * 1000 + (p[1] - '0') * 100 + (p[2] - '0') * 10 + (p[3] - '0');
+        }
+    }
+    free(data);
+    return v;
+}
+
 static int read_blocks(void *handle, void *buf, int lba, int num_blocks) {
     return dp_source_read_blocks(handle, buf, lba, num_blocks);
 }
@@ -1037,15 +1083,31 @@ dp_bd *dp_bd_open(dp_source *src, const dp_platform *pf, const dp_bd_options *op
         return NULL;
     }
     d->st.aacs = di->aacs_detected;
-    if (di->aacs_detected && !di->aacs_handled) {
-        if (!di->libaacs_detected) snprintf(err, (size_t)errlen, "该盘有版权保护，需要启用解密组件（AACS）");
-        else snprintf(err, (size_t)errlen, "AACS 解密失败（错误码 %d）", di->aacs_error_code);
+    int indx = index_version(d->bd);
+    if (di->aacs_detected) {
+        dp_log(DP_LOG_INFO, TAG, "AACS：解密组件%s，MKB 版本 %d，index.bdmv 版本 %04d，结果 %d", di->libaacs_detected ? "已加载" : "没有加载",
+               di->aacs_mkbv, indx, di->aacs_error_code);
+    }
+    if (di->aacs_detected && indx >= 300) {
+        /* Ultra HD Blu-ray：AACS 2.0，不支持（即使 KEYDB 里有密钥也不试） */
+        snprintf(err, (size_t)errlen, "不支持 AACS 2.0（4K UHD 蓝光）");
         dp_log(DP_LOG_WARN, TAG, "%s", err);
         dp_bd_close(d);
         return NULL;
     }
+    if (di->aacs_detected && !di->aacs_handled) {
+        if (!di->libaacs_detected) snprintf(err, (size_t)errlen, "该盘有版权保护，需要启用解密组件（AACS）");
+        else aacs_error_text(di, err, errlen);
+        dp_log(DP_LOG_WARN, TAG, "%s（libaacs 错误码 %d）", err, di->aacs_error_code);
+        dp_bd_close(d);
+        return NULL;
+    }
     if (di->bdplus_detected && !di->bdplus_handled) {
-        dp_log(DP_LOG_WARN, TAG, "这张盘有 BD+ 保护：没有 BD+ 解密，部分内容可能花屏");
+        /* BD+ 是 AACS 之外的另一层保护（盘上带一段程序修补视频）。没有 libbdplus 时视频会大片花屏：不播 */
+        snprintf(err, (size_t)errlen, "这张盘除了 AACS 还有 BD+ 保护（本 App 不支持 BD+）");
+        dp_log(DP_LOG_WARN, TAG, "%s", err);
+        dp_bd_close(d);
+        return NULL;
     }
     bd_set_player_setting_str(d->bd, BLURAY_PLAYER_SETTING_AUDIO_LANG, opt->audio_lang[0] ? opt->audio_lang : "jpn");
     bd_set_player_setting_str(d->bd, BLURAY_PLAYER_SETTING_PG_LANG, opt->pg_lang[0] ? opt->pg_lang : "chi");

@@ -45,6 +45,9 @@ class VideoDiscInfo(
         val out = mutableListOf<String>()
         out += "视频结构：${format.label}，${titles.size} 个标题" + (if (filtered > 0) "（另有 $filtered 个重复 / 循环播放列表已过滤）" else "") +
             (main?.let { "，主片 ${it.id}（${formatDuration(it.durationMs)}）" } ?: "")
+        bd?.indexVersion?.let { v ->
+            out += "  index.bdmv 版本 %04d".format(v) + if (bd.uhd) "：Ultra HD Blu-ray（4K）" + (if (aacs) "，AACS 2.0 加密（不支持）" else "") else ""
+        }
         for (t in titles.take(MAX_LOG_TITLES)) {
             out += "  ${if (t === main) "★" else " "} ${t.id}：${formatDuration(t.durationMs)}，${t.chapters} 章" +
                 (if (t.angles > 1) "，${t.angles} 个角度" else "") + "，${t.video}" +

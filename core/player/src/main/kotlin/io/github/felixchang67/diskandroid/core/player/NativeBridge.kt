@@ -99,4 +99,13 @@ object NativeBridge {
 
     /** 停用 CSS 解密组件（删除组件之后）。 */
     @JvmStatic external fun nativeDetachCss()
+
+    /**
+     * 启用 AACS 解密组件（libaacs）。[path] 必须以 ".so.0" 结尾（libbluray 按 LIBAACS_PATH + ".so.0" 加载）；
+     * [configHome] 下面的 aacs/KEYDB.cfg 是密钥库，[cacheHome] 是 libaacs 的密钥缓存目录。null = 成功，否则是原因。
+     */
+    @JvmStatic external fun nativeAttachAacs(path: String, configHome: String, cacheHome: String): String?
+
+    /** 停用 AACS 解密组件（删除组件之后）。 */
+    @JvmStatic external fun nativeDetachAacs()
 }
