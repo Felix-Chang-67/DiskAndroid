@@ -1,0 +1,525 @@
+diff -ruN a/libdvdcss-1.6.0/src/dc_host.h b/libdvdcss-1.6.0/src/dc_host.h
+--- a/src/dc_host.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/dc_host.h	2026-11-11 03:49:07.315631567 +0000
+@@ -0,0 +1,46 @@
++/*
++ * DiskAndroid 解密组件的宿主接口（ABI，C）。
++ *
++ * 解密组件（打过补丁的 libdvdcss / libaacs）不随 App 分发，由用户导入。光驱接在 USB 上，没有内核驱动，
++ * 组件不能自己打开设备发认证命令，所以由 App 提供"发一条 SCSI 命令"的回调：命令经 App 的光驱会话发出，
++ * 照样经过只读守卫（只放行认证需要的 REPORT KEY / SEND KEY / READ DISC STRUCTURE 格式，设置地区码永远发不出去）
++ * 和命令日志（CDB、结果、sense 原文；密钥类载荷不写进日志）。
++ *
++ * 组件导出 `dvdcss_set_host`（libdvdcss）或 `aacs_set_host`（libaacs）接收这个结构，返回它支持的版本号。
++ * 这个文件在 App 和组件的编译里各有一份，改动时两边同时改并升版本号。
++ */
++#ifndef DC_HOST_H
++#define DC_HOST_H
++
++#include <stdint.h>
++
++#define DC_HOST_API_VERSION 1
++
++enum {
++    DC_DIR_NONE = 0,   /* 没有数据阶段 */
++    DC_DIR_IN = 1,     /* 光驱 → 主机 */
++    DC_DIR_OUT = 2,    /* 主机 → 光驱 */
++};
++
++enum {
++    DC_LOG_DEBUG = 0,
++    DC_LOG_INFO = 1,
++    DC_LOG_WARN = 2,
++    DC_LOG_ERROR = 3,
++};
++
++typedef struct dc_host_api {
++    int version;   /* DC_HOST_API_VERSION */
++    void *opaque;
++    /*
++     * 发一条 SCSI 命令（阻塞）。
++     * 返回 0 = GOOD；> 0 = CHECK CONDITION（sense 写进 sense，*sense_len = 长度）；
++     * < 0 = 没发成：光驱已断开、传输错误、被只读守卫拒绝。
++     */
++    int (*scsi)(void *opaque, const uint8_t *cdb, int cdb_len, int dir, uint8_t *buf, int buf_len,
++                uint8_t *sense, int *sense_len, int timeout_ms);
++    /* 写日志（UTF-8，一行）。 */
++    void (*log)(void *opaque, int level, const char *msg);
++} dc_host_api;
++
++#endif
+diff -ruN a/libdvdcss-1.6.0/src/device.c b/libdvdcss-1.6.0/src/device.c
+--- a/src/device.c	2026-07-13 14:07:35.000000000 +0000
++++ b/src/device.c	2026-11-11 03:50:06.148181967 +0000
+@@ -74,6 +74,7 @@
+ #include "libdvdcss.h"
+ #include "ioctl.h"
+ #include "device.h"
++#include "host.h"
+ 
+ #ifndef O_BINARY
+ #define O_BINARY 0
+@@ -103,8 +104,9 @@
+ 
+ int dvdcss_use_ioctls( dvdcss_t dvdcss )
+ {
++    /* Stream mode: ioctls only if the host application sends them for us */
+     if( dvdcss->p_stream )
+-        return 0;
++        return dvdcss_host_active();
+ 
+ #if defined( _WIN32 )
+     if( dvdcss->b_file )
+diff -ruN a/libdvdcss-1.6.0/src/dvdcss/dvdcss.h b/libdvdcss-1.6.0/src/dvdcss/dvdcss.h
+--- a/src/dvdcss/dvdcss.h	2026-07-13 14:07:35.000000000 +0000
++++ b/src/dvdcss/dvdcss.h	2026-11-11 03:50:06.149205623 +0000
+@@ -108,6 +108,15 @@
+ 
+ LIBDVDCSS_EXPORT int dvdcss_get_encryption_type ( dvdcss_t );
+ 
++/*
++ * DiskAndroid: SCSI pass-through supplied by the host application (USB
++ * drives without a kernel driver). With a host set, stream mode
++ * (dvdcss_open_stream) authenticates the drive through it. The argument
++ * is a dc_host_api (see dc_host.h); returns the API version supported.
++ */
++struct dc_host_api;
++LIBDVDCSS_EXPORT int dvdcss_set_host ( const struct dc_host_api * );
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -ruN a/libdvdcss-1.6.0/src/error.c b/libdvdcss-1.6.0/src/error.c
+--- a/src/error.c	2026-07-13 14:07:35.000000000 +0000
++++ b/src/error.c	2026-11-11 03:50:06.148855509 +0000
+@@ -24,6 +24,7 @@
+ #include <stdio.h>
+ 
+ #include "libdvdcss.h"
++#include "host.h"
+ 
+ static void print_message( const char *prefix, const char *psz_string,
+                            va_list args )
+@@ -38,6 +39,12 @@
+  *****************************************************************************/
+ void print_error( dvdcss_t dvdcss, const char *psz_string, ... )
+ {
++    {
++        va_list args;
++        va_start( args, psz_string );
++        dvdcss_host_log( 2, "error", psz_string, args );
++        va_end( args );
++    }
+     if( dvdcss->b_errors )
+     {
+         va_list args;
+@@ -55,6 +62,12 @@
+  *****************************************************************************/
+ void print_debug( const dvdcss_t dvdcss, const char *psz_string, ... )
+ {
++    {
++        va_list args;
++        va_start( args, psz_string );
++        dvdcss_host_log( 0, "debug", psz_string, args );
++        va_end( args );
++    }
+     if( dvdcss->b_debug )
+     {
+         va_list args;
+diff -ruN a/libdvdcss-1.6.0/src/host.c b/libdvdcss-1.6.0/src/host.c
+--- a/src/host.c	1970-01-01 00:00:00.000000000 +0000
++++ b/src/host.c	2026-11-11 03:50:06.145175185 +0000
+@@ -0,0 +1,207 @@
++/*****************************************************************************
++ * host.c: SCSI pass-through supplied by the host application (DiskAndroid)
++ *****************************************************************************
++ * CDB layouts follow MMC REPORT KEY (A4h) / SEND KEY (A3h) / READ DVD
++ * STRUCTURE (ADh) for Key Class 00h, exactly as the raw-CDB backends in
++ * ioctl.c build them (Haiku / Solaris / OS/2): byte 7 = key class or
++ * structure format, bytes 8-9 = allocation / parameter list length,
++ * byte 10 = AGID << 6 | key format.
++ *
++ * Never sends SEND KEY key format 06h (RPC structure, sets the drive's
++ * region): libdvdcss does not need it and the host refuses it anyway.
++ *****************************************************************************/
++
++#include "config.h"
++
++#include <stdarg.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "dvdcss/dvdcss.h"
++#include "dc_host.h"
++#include "common.h"
++#include "css.h"
++#include "ioctl.h"
++#include "host.h"
++
++#define DVD_CHALLENGE_SIZE 10
++
++static dc_host_api g_host;
++static int g_host_set;
++
++LIBDVDCSS_EXPORT int dvdcss_set_host( const dc_host_api *p_host )
++{
++    if( p_host == NULL || p_host->version < 1 || p_host->scsi == NULL )
++    {
++        g_host_set = 0;
++        return DC_HOST_API_VERSION;
++    }
++    g_host = *p_host;
++    g_host_set = 1;
++    return DC_HOST_API_VERSION;
++}
++
++int dvdcss_host_active( void )
++{
++    return g_host_set;
++}
++
++void dvdcss_host_log( int i_level, const char *psz_prefix, const char *psz_format, va_list args )
++{
++    if( !g_host_set || g_host.log == NULL )
++        return;
++    char psz_msg[512];
++    int i = snprintf( psz_msg, sizeof( psz_msg ), "libdvdcss %s: ", psz_prefix );
++    if( i < 0 || i >= (int)sizeof( psz_msg ) )
++        i = 0;
++    vsnprintf( psz_msg + i, sizeof( psz_msg ) - i, psz_format, args );
++    g_host.log( g_host.opaque, i_level, psz_msg );
++}
++
++/* Send one 12-byte CDB. Returns 0 on GOOD status, -1 otherwise. */
++static int host_exec( uint8_t *p_cdb, int i_dir, uint8_t *p_buf, int i_len )
++{
++    uint8_t p_sense[32];
++    int i_sense = sizeof( p_sense );
++    if( !g_host_set )
++        return -1;
++    p_cdb[8] = ( i_len >> 8 ) & 0xff;
++    p_cdb[9] = i_len & 0xff;
++    int i_ret = g_host.scsi( g_host.opaque, p_cdb, 12, i_len ? i_dir : DC_DIR_NONE,
++                             p_buf, i_len, p_sense, &i_sense, 10000 );
++    return i_ret == 0 ? 0 : -1;
++}
++
++static void init_cdb( uint8_t *p_cdb, uint8_t i_op )
++{
++    memset( p_cdb, 0, 12 );
++    p_cdb[0] = i_op;
++}
++
++int host_ReadCopyright( int i_layer, int *pi_copyright )
++{
++    uint8_t p_cdb[12], p_buf[8];
++    init_cdb( p_cdb, GPCMD_READ_DVD_STRUCTURE );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[6] = i_layer;
++    p_cdb[7] = DVD_STRUCT_COPYRIGHT;
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    *pi_copyright = p_buf[4];
++    return i_ret;
++}
++
++int host_ReadDiscKey( const int *pi_agid, uint8_t *p_key )
++{
++    uint8_t p_cdb[12], p_buf[DVD_DISCKEY_SIZE + 4];
++    init_cdb( p_cdb, GPCMD_READ_DVD_STRUCTURE );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[7] = DVD_STRUCT_DISCKEY;
++    p_cdb[10] = *pi_agid << 6;
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    if( i_ret < 0 )
++        return i_ret;
++    memcpy( p_key, p_buf + 4, DVD_DISCKEY_SIZE );
++    return 0;
++}
++
++int host_ReadTitleKey( const int *pi_agid, int i_pos, uint8_t *p_key )
++{
++    uint8_t p_cdb[12], p_buf[12];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[2] = ( i_pos >> 24 ) & 0xff;
++    p_cdb[3] = ( i_pos >> 16 ) & 0xff;
++    p_cdb[4] = ( i_pos >>  8 ) & 0xff;
++    p_cdb[5] = ( i_pos       ) & 0xff;
++    p_cdb[10] = DVD_REPORT_TITLE_KEY | ( *pi_agid << 6 );
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    memcpy( p_key, p_buf + 5, DVD_KEY_SIZE );
++    return i_ret;
++}
++
++int host_ReportAgid( int *pi_agid )
++{
++    uint8_t p_cdb[12], p_buf[8];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_REPORT_AGID | ( *pi_agid << 6 );
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    *pi_agid = p_buf[7] >> 6;
++    return i_ret;
++}
++
++int host_ReportChallenge( const int *pi_agid, uint8_t *p_challenge )
++{
++    uint8_t p_cdb[12], p_buf[16];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_REPORT_CHALLENGE | ( *pi_agid << 6 );
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    memcpy( p_challenge, p_buf + 4, DVD_CHALLENGE_SIZE );
++    return i_ret;
++}
++
++int host_ReportASF( int *pi_asf )
++{
++    uint8_t p_cdb[12], p_buf[8];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_REPORT_ASF;
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    *pi_asf = p_buf[7] & 1;
++    return i_ret;
++}
++
++int host_ReportKey1( const int *pi_agid, uint8_t *p_key )
++{
++    uint8_t p_cdb[12], p_buf[12];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_REPORT_KEY1 | ( *pi_agid << 6 );
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    memcpy( p_key, p_buf + 4, DVD_KEY_SIZE );
++    return i_ret;
++}
++
++int host_InvalidateAgid( int *pi_agid )
++{
++    uint8_t p_cdb[12];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    p_cdb[10] = DVDCSS_INVALIDATE_AGID | ( *pi_agid << 6 );
++    return host_exec( p_cdb, DC_DIR_NONE, NULL, 0 );
++}
++
++int host_SendChallenge( const int *pi_agid, const uint8_t *p_challenge )
++{
++    uint8_t p_cdb[12], p_buf[16];
++    init_cdb( p_cdb, GPCMD_SEND_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_SEND_CHALLENGE | ( *pi_agid << 6 );
++    p_buf[1] = 0xe;
++    memcpy( p_buf + 4, p_challenge, DVD_CHALLENGE_SIZE );
++    return host_exec( p_cdb, DC_DIR_OUT, p_buf, sizeof( p_buf ) );
++}
++
++int host_SendKey2( const int *pi_agid, const uint8_t *p_key )
++{
++    uint8_t p_cdb[12], p_buf[12];
++    init_cdb( p_cdb, GPCMD_SEND_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_SEND_KEY2 | ( *pi_agid << 6 );
++    p_buf[1] = 0xa;
++    memcpy( p_buf + 4, p_key, DVD_KEY_SIZE );
++    return host_exec( p_cdb, DC_DIR_OUT, p_buf, sizeof( p_buf ) );
++}
++
++int host_ReportRPC( int *p_type, int *p_mask, int *p_scheme )
++{
++    uint8_t p_cdb[12], p_buf[8];
++    init_cdb( p_cdb, GPCMD_REPORT_KEY );
++    memset( p_buf, 0, sizeof( p_buf ) );
++    p_cdb[10] = DVD_REPORT_RPC;
++    int i_ret = host_exec( p_cdb, DC_DIR_IN, p_buf, sizeof( p_buf ) );
++    *p_type = p_buf[4] >> 6;
++    *p_mask = p_buf[5];
++    *p_scheme = p_buf[6];
++    return i_ret;
++}
+diff -ruN a/libdvdcss-1.6.0/src/host.h b/libdvdcss-1.6.0/src/host.h
+--- a/src/host.h	1970-01-01 00:00:00.000000000 +0000
++++ b/src/host.h	2026-11-11 03:50:17.052666206 +0000
+@@ -0,0 +1,30 @@
++/*****************************************************************************
++ * host.h: SCSI pass-through supplied by the host application (DiskAndroid)
++ *****************************************************************************
++ * In stream mode libdvdcss has no device to send ioctls to. When the host
++ * application registers a dc_host_api with dvdcss_set_host(), the CSS
++ * authentication commands (REPORT KEY / SEND KEY / READ DVD STRUCTURE) are
++ * built here as raw MMC CDBs and sent through the host's callback.
++ *****************************************************************************/
++#ifndef DVDCSS_HOST_H
++#define DVDCSS_HOST_H
++
++#include <stdarg.h>
++#include <stdint.h>
++
++int  dvdcss_host_active( void );
++void dvdcss_host_log( int i_level, const char *psz_prefix, const char *psz_format, va_list args );
++
++int host_ReadCopyright  ( int i_layer, int *pi_copyright );
++int host_ReadDiscKey    ( const int *pi_agid, uint8_t *p_key );
++int host_ReadTitleKey   ( const int *pi_agid, int i_pos, uint8_t *p_key );
++int host_ReportAgid     ( int *pi_agid );
++int host_ReportChallenge( const int *pi_agid, uint8_t *p_challenge );
++int host_ReportASF      ( int *pi_asf );
++int host_ReportKey1     ( const int *pi_agid, uint8_t *p_key );
++int host_InvalidateAgid ( int *pi_agid );
++int host_SendChallenge  ( const int *pi_agid, const uint8_t *p_challenge );
++int host_SendKey2       ( const int *pi_agid, const uint8_t *p_key );
++int host_ReportRPC      ( int *p_type, int *p_mask, int *p_scheme );
++
++#endif
+diff -ruN a/libdvdcss-1.6.0/src/ioctl.c b/libdvdcss-1.6.0/src/ioctl.c
+--- a/src/ioctl.c	2026-07-13 14:07:35.000000000 +0000
++++ b/src/ioctl.c	2026-11-11 03:50:06.147685879 +0000
+@@ -96,6 +96,7 @@
+ #include "common.h"
+ #include "css.h"
+ #include "ioctl.h"
++#include "host.h"
+ 
+ #define DVD_CHALLENGE_SIZE 10
+ 
+@@ -120,6 +121,9 @@
+  *****************************************************************************/
+ int ioctl_ReadCopyright( int i_fd, int i_layer, int *pi_copyright )
+ {
++    if( dvdcss_host_active() )
++        return host_ReadCopyright( i_layer, pi_copyright );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -242,6 +246,9 @@
+  *****************************************************************************/
+ int ioctl_ReadDiscKey( int i_fd, const int *pi_agid, uint8_t *p_key )
+ {
++    if( dvdcss_host_active() )
++        return host_ReadDiscKey( pi_agid, p_key );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -372,6 +379,9 @@
+  *****************************************************************************/
+ int ioctl_ReadTitleKey( int i_fd, const int *pi_agid, int i_pos, uint8_t *p_key )
+ {
++    if( dvdcss_host_active() )
++        return host_ReadTitleKey( pi_agid, i_pos, p_key );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -506,6 +516,9 @@
+  *****************************************************************************/
+ int ioctl_ReportAgid( int i_fd, int *pi_agid )
+ {
++    if( dvdcss_host_active() )
++        return host_ReportAgid( pi_agid );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -603,6 +616,9 @@
+  *****************************************************************************/
+ int ioctl_ReportChallenge( int i_fd, const int *pi_agid, uint8_t *p_challenge )
+ {
++    if( dvdcss_host_active() )
++        return host_ReportChallenge( pi_agid, p_challenge );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -713,6 +729,9 @@
+  *****************************************************************************/
+ int ioctl_ReportASF( int i_fd, int *pi_asf )
+ {
++    if( dvdcss_host_active() )
++        return host_ReportASF( pi_asf );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -825,6 +844,9 @@
+  *****************************************************************************/
+ int ioctl_ReportKey1( int i_fd, const int *pi_agid, uint8_t *p_key )
+ {
++    if( dvdcss_host_active() )
++        return host_ReportKey1( pi_agid, p_key );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -930,6 +952,9 @@
+  *****************************************************************************/
+ int ioctl_InvalidateAgid( int i_fd, int *pi_agid )
+ {
++    if( dvdcss_host_active() )
++        return host_InvalidateAgid( pi_agid );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -1015,6 +1040,9 @@
+  *****************************************************************************/
+ int ioctl_ReadCPRMMediaId(int i_fd,int *p_agid, uint8_t *p_data_buffer)
+ {
++    if( dvdcss_host_active() )
++        return -1; /* CPRM: not supported through the host */
++
+     int i_ret;
+ 
+ #if (defined( HAVE_LINUX_DVD_STRUCT ) && defined( HAVE_SCSI_SG_H )) || (defined( HAVE_BSD_DVD_STRUCT ) && defined( HAVE_CAM_SCSI_SCSI_SG_H ))
+@@ -1135,6 +1163,9 @@
+  *****************************************************************************/
+ int ioctl_ReadCPRMMKBPack(int i_fd, int *p_agid, int mkb_pack, uint8_t *p_mkb_pack, int *p_total_packs)
+ {
++    if( dvdcss_host_active() )
++        return -1; /* CPRM: not supported through the host */
++
+     int i_ret;
+ 
+ #if (defined( HAVE_LINUX_DVD_STRUCT ) && defined( HAVE_SCSI_SG_H )) || (defined( HAVE_BSD_DVD_STRUCT ) && defined( HAVE_CAM_SCSI_SCSI_SG_H ))
+@@ -1284,6 +1315,9 @@
+  *****************************************************************************/
+ int ioctl_SendChallenge( int i_fd, const int *pi_agid, const uint8_t *p_challenge )
+ {
++    if( dvdcss_host_active() )
++        return host_SendChallenge( pi_agid, p_challenge );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -1395,6 +1429,9 @@
+  *****************************************************************************/
+ int ioctl_SendKey2( int i_fd, const int *pi_agid, const uint8_t *p_key )
+ {
++    if( dvdcss_host_active() )
++        return host_SendKey2( pi_agid, p_key );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT )
+@@ -1506,6 +1543,9 @@
+  *****************************************************************************/
+ int ioctl_ReportRPC( int i_fd, int *p_type, int *p_mask, int *p_scheme )
+ {
++    if( dvdcss_host_active() )
++        return host_ReportRPC( p_type, p_mask, p_scheme );
++
+     int i_ret;
+ 
+ #if defined( HAVE_LINUX_DVD_STRUCT ) && defined( DVD_LU_SEND_RPC_STATE )
+diff -ruN a/libdvdcss-1.6.0/src/meson.build b/libdvdcss-1.6.0/src/meson.build
+--- a/src/meson.build	2026-07-13 14:07:35.000000000 +0000
++++ b/src/meson.build	2026-11-11 03:50:06.149049436 +0000
+@@ -4,6 +4,7 @@
+     'css.c',
+     'device.c',
+     'error.c',
++    'host.c',
+     'ioctl.c',
+     'libdvdcpxm.c',
+     'libdvdcss.c',

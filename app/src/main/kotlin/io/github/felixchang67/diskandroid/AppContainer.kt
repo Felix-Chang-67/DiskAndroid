@@ -52,6 +52,7 @@ class AppContainer(val app: Application) {
     val files: DiscBrowser
     val rip: RipController
     val video: io.github.felixchang67.diskandroid.video.VideoPlaybackController
+    val decrypt: io.github.felixchang67.diskandroid.video.DecryptComponents
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
     var previousSessionIssues: PreviousSession.Issues? = null
@@ -71,7 +72,8 @@ class AppContainer(val app: Application) {
         files = DiscBrowser(app, log, mainScope, outputFolder)
         rip = RipController(app, log, mainScope, outputFolder, files)
         files.otherJobRunning = { rip.running }
-        video = io.github.felixchang67.diskandroid.video.VideoPlaybackController(app, log, mainScope, files)
+        decrypt = io.github.felixchang67.diskandroid.video.DecryptComponents(app, log)
+        video = io.github.felixchang67.diskandroid.video.VideoPlaybackController(app, log, mainScope, files, decrypt)
         video.busyReason = {
             when {
                 rip.running -> "正在读盘，读完（或取消）之后才能播放"
@@ -85,6 +87,7 @@ class AppContainer(val app: Application) {
     fun start() {
         log.i(LogTags.APP, "DiskAndroid 启动", "会话" to sessionId, "日志目录" to logDir.absolutePath)
         SystemInfo.lines(app).forEach { log.i(LogTags.APP, it) }
+        decrypt.describe().forEach { log.i(io.github.felixchang67.diskandroid.video.DecryptComponents.TAG, it) }
         mainScope.launch(kotlinx.coroutines.Dispatchers.Default) {
             io.github.felixchang67.diskandroid.diag.Decoders.lines().forEach { log.i("CODEC", it) }
         }

@@ -16,6 +16,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "../src/dc_host.h"
 #include "../src/dp_core.h"
 #include "../src/dp_dvd.h"
 
@@ -133,6 +134,90 @@ static void event_cb(void *opaque, int ev, int a1, int a2, const char *text) {
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
     if (t) (*env)->DeleteLocalRef(env, t);
 }
+
+/* ---------------- 解密组件的宿主接口（dc_host.h） ---------------- */
+
+/*
+ * 组件（libdvdcss / libaacs）的认证命令经这里发给光驱：JNI 回调当前播放器的 SectorReader.scsi（Kotlin），
+ * 由光驱会话发出（只读守卫 + 命令日志）。组件是进程级的，所以"当前播放器"也是全局的（同一时刻只放一张盘）。
+ */
+static pthread_mutex_t g_access_lock = PTHREAD_MUTEX_INITIALIZER;
+static jobject g_access;
+static jmethodID g_scsi_mid;
+
+static void access_set(JNIEnv *env, jobject reader) {
+    pthread_mutex_lock(&g_access_lock);
+    if (g_access) (*env)->DeleteGlobalRef(env, g_access);
+    g_access = reader ? (*env)->NewGlobalRef(env, reader) : NULL;
+    if (reader) {
+        jclass c = (*env)->GetObjectClass(env, reader);
+        g_scsi_mid = (*env)->GetMethodID(env, c, "scsi", "([BI[B[BI)I");
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            g_scsi_mid = NULL;
+        }
+    }
+    pthread_mutex_unlock(&g_access_lock);
+}
+
+static void access_clear(JNIEnv *env, jobject reader) {
+    pthread_mutex_lock(&g_access_lock);
+    if (g_access && (*env)->IsSameObject(env, g_access, reader)) {
+        (*env)->DeleteGlobalRef(env, g_access);
+        g_access = NULL;
+    }
+    pthread_mutex_unlock(&g_access_lock);
+}
+
+static int host_scsi(void *opaque, const uint8_t *cdb, int cdb_len, int dir, uint8_t *buf, int buf_len, uint8_t *sense, int *sense_len,
+                     int timeout_ms) {
+    JNIEnv *env = get_env();
+    if (!env || cdb_len <= 0 || cdb_len > 16 || buf_len < 0) return -1;
+    pthread_mutex_lock(&g_access_lock);
+    jobject acc = g_access ? (*env)->NewLocalRef(env, g_access) : NULL;
+    jmethodID mid = g_scsi_mid;
+    pthread_mutex_unlock(&g_access_lock);
+    if (!acc || !mid) {
+        dp_log(DP_LOG_WARN, opaque ? (const char *)opaque : "DECRYPT", "认证命令发不出去：没有正在使用的光驱");
+        if (acc) (*env)->DeleteLocalRef(env, acc);
+        return -1;
+    }
+    jbyteArray jcdb = (*env)->NewByteArray(env, cdb_len);
+    (*env)->SetByteArrayRegion(env, jcdb, 0, cdb_len, (const jbyte *)cdb);
+    jbyteArray jdata = NULL;
+    if (dir != DC_DIR_NONE && buf_len > 0) {
+        jdata = (*env)->NewByteArray(env, buf_len);
+        if (dir == DC_DIR_OUT) (*env)->SetByteArrayRegion(env, jdata, 0, buf_len, (const jbyte *)buf);
+    }
+    jbyteArray jsense = (*env)->NewByteArray(env, 64);
+    jint r = (*env)->CallIntMethod(env, acc, mid, jcdb, (jint)dir, jdata, jsense, (jint)timeout_ms);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        r = -1;
+    }
+    if (r == 0 && dir == DC_DIR_IN && jdata) (*env)->GetByteArrayRegion(env, jdata, 0, buf_len, (jbyte *)buf);
+    if (r > 0) {
+        int n = r < 64 ? r : 64;
+        if (sense_len && *sense_len < n) n = *sense_len;
+        if (sense && n > 0) (*env)->GetByteArrayRegion(env, jsense, 0, n, (jbyte *)sense);
+        if (sense_len) *sense_len = n;
+        r = 1;
+    }
+    (*env)->DeleteLocalRef(env, jcdb);
+    if (jdata) (*env)->DeleteLocalRef(env, jdata);
+    (*env)->DeleteLocalRef(env, jsense);
+    (*env)->DeleteLocalRef(env, acc);
+    return r;
+}
+
+static void host_log(void *opaque, int level, const char *msg) {
+    dp_log(level <= DC_LOG_DEBUG ? DP_LOG_DEBUG : level == DC_LOG_INFO ? DP_LOG_INFO : level == DC_LOG_WARN ? DP_LOG_WARN : DP_LOG_ERROR,
+           opaque ? (const char *)opaque : "DECRYPT", "%s", msg);
+}
+
+static dc_host_api g_css_host = {DC_HOST_API_VERSION, (void *)"CSS", host_scsi, host_log};
+static void *g_css_lib;
+static char g_css_path[512];
 
 /* ---------------- OpenGL ES 3 视频输出 ---------------- */
 
@@ -589,6 +674,8 @@ JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject read
     jclass lc = (*env)->GetObjectClass(env, listener);
     p->event_mid = (*env)->GetMethodID(env, lc, "onEvent", "(IIILjava/lang/String;)V");
     p->src = dp_source_new(read_cb, p, (uint64_t)size, prefetch);
+    /* 解密组件认证时用这台光驱（打开 DVD 时 libdvdcss 就会认证） */
+    access_set(env, reader);
 
     dp_platform pf = {
         .opaque = p, .video_present = video_present, .video_idle = video_idle, .video_exit = video_exit,
@@ -620,6 +707,7 @@ JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject read
             jstring e = (*env)->NewStringUTF(env, err);
             (*env)->SetObjectArrayElement(env, err_out, 0, e);
         }
+        access_clear(env, reader);
         dp_source_free(p->src);
         (*env)->DeleteGlobalRef(env, p->reader);
         (*env)->DeleteGlobalRef(env, p->listener);
@@ -722,6 +810,7 @@ JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
     pthread_mutex_unlock(&p->win_lock);
     audio_close(p);
     dp_source_free(p->src);
+    access_clear(env, p->reader);
     (*env)->DeleteGlobalRef(env, p->reader);
     (*env)->DeleteGlobalRef(env, p->listener);
     pthread_mutex_destroy(&p->win_lock);
@@ -729,6 +818,75 @@ JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
     pthread_mutex_destroy(&p->aa_lock);
     free(p->ov_pm);
     free(p);
+}
+
+/*
+ * 检查一个导入的组件：能不能加载、有没有 [symbol]（打过 DiskAndroid 补丁的 libdvdcss 有 dvdcss_set_host）。
+ * 返回 null 表示没问题，否则是原因。
+ */
+JNIEXPORT jstring JNICALL JFN(nativeCheckComponent)(JNIEnv *env, jclass cls, jstring jpath, jstring jsymbol) {
+    (void)cls;
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    const char *symbol = (*env)->GetStringUTFChars(env, jsymbol, NULL);
+    char msg[512] = "";
+    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!h) {
+        const char *e = dlerror();
+        snprintf(msg, sizeof(msg), "加载失败：%s", e ? e : "未知原因");
+    } else {
+        if (!dlsym(h, symbol)) snprintf(msg, sizeof(msg), "缺少 %s（不是给 DiskAndroid 编的版本）", symbol);
+        dlclose(h);
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    (*env)->ReleaseStringUTFChars(env, jsymbol, symbol);
+    return msg[0] ? (*env)->NewStringUTF(env, msg) : NULL;
+}
+
+/*
+ * 启用 CSS 解密组件：加载、把宿主接口交给它，并让 libdvdread 用它（环境变量 DISKANDROID_DVDCSS）。
+ * [cache] 是标题密钥缓存目录（libdvdcss 的 DVDCSS_CACHE）。返回 null 表示成功，否则是原因。
+ */
+JNIEXPORT jstring JNICALL JFN(nativeAttachCss)(JNIEnv *env, jclass cls, jstring jpath, jstring jcache) {
+    (void)cls;
+    dp_log_set(log_to_java, NULL);
+    const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+    const char *cache = (*env)->GetStringUTFChars(env, jcache, NULL);
+    char msg[512] = "";
+    if (!g_css_lib || strcmp(g_css_path, path) != 0) {
+        void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        if (!h) {
+            const char *e = dlerror();
+            snprintf(msg, sizeof(msg), "加载失败：%s", e ? e : "未知原因");
+        } else {
+            g_css_lib = h;
+            snprintf(g_css_path, sizeof(g_css_path), "%s", path);
+        }
+    }
+    if (!msg[0]) {
+        int (*set_host)(const dc_host_api *) = (int (*)(const dc_host_api *))dlsym(g_css_lib, "dvdcss_set_host");
+        if (!set_host) {
+            snprintf(msg, sizeof(msg), "缺少 dvdcss_set_host（不是给 DiskAndroid 编的版本）");
+        } else {
+            int v = set_host(&g_css_host);
+            setenv("DISKANDROID_DVDCSS", path, 1);
+            setenv("DVDCSS_CACHE", cache, 1);
+            dp_log(DP_LOG_INFO, "CSS", "已启用 DVD 解密组件（接口版本 %d）：%s", v, path);
+        }
+    }
+    (*env)->ReleaseStringUTFChars(env, jpath, path);
+    (*env)->ReleaseStringUTFChars(env, jcache, cache);
+    return msg[0] ? (*env)->NewStringUTF(env, msg) : NULL;
+}
+
+/* 停用 CSS 解密组件（删除组件后）：libdvdread 下次打开盘时不再加载它。 */
+JNIEXPORT void JNICALL JFN(nativeDetachCss)(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    unsetenv("DISKANDROID_DVDCSS");
+    if (g_css_lib) {
+        int (*set_host)(const dc_host_api *) = (int (*)(const dc_host_api *))dlsym(g_css_lib, "dvdcss_set_host");
+        if (set_host) set_host(NULL);
+    }
 }
 
 JNIEXPORT jstring JNICALL JFN(nativeVersion)(JNIEnv *env, jclass cls) {

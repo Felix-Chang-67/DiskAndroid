@@ -7,6 +7,7 @@
 -keep interface io.github.felixchang67.diskandroid.core.player.PlayerListener { *; }
 -keep class * implements io.github.felixchang67.diskandroid.core.player.SectorReader {
     public int read(long, java.nio.ByteBuffer, int);
+    public int scsi(byte[], int, byte[], byte[], int);
 }
 -keep class * implements io.github.felixchang67.diskandroid.core.player.PlayerListener {
     public void onEvent(int, int, int, java.lang.String);

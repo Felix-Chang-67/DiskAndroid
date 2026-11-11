@@ -94,14 +94,52 @@ class ReadOnlyPolicyTest {
         assertTrue(ReadOnlyPolicy.check(cmd(0x1B, 0, 0, 0, 0x30, 0)) != null)
     }
 
+    private fun key(op: Int, keyClass: Int, format: Int, agid: Int = 0, dir: DataDirection, len: Int = 16): ScsiCommand {
+        val cdb = ByteArray(12).also {
+            it[0] = op.toByte()
+            it[7] = keyClass.toByte()
+            it[9] = len.toByte()
+            it[10] = ((agid shl 6) or format).toByte()
+        }
+        return when (dir) {
+            DataDirection.NONE -> ScsiCommand.noData(cdb, "key")
+            DataDirection.IN -> ScsiCommand.dataIn(cdb, len, "key")
+            DataDirection.OUT -> ScsiCommand(cdb, DataDirection.OUT, ByteArray(len), 0, len, name = "key")
+        }
+    }
+
     @Test
-    fun reportKeyOnlyAllowsRpcState() {
-        val rpc = ByteArray(12).also { it[0] = 0xA4.toByte(); it[10] = 0x08 }
-        assertNull(ReadOnlyPolicy.check(ScsiCommand.dataIn(rpc, 8, "rpc")))
-        val agid = ByteArray(12).also { it[0] = 0xA4.toByte(); it[10] = 0x00 }
-        assertTrue(ReadOnlyPolicy.check(ScsiCommand.dataIn(agid, 8, "agid")) != null)
-        val aacs = ByteArray(12).also { it[0] = 0xA4.toByte(); it[7] = 0x02; it[10] = 0x08 }
-        assertTrue(ReadOnlyPolicy.check(ScsiCommand.dataIn(aacs, 8, "aacs")) != null)
+    fun reportKeyAllowsRpcStateAndAuthenticationFormats() {
+        // CSS：AGID、Challenge、KEY1、标题密钥、ASF、RPC 状态、作废 AGID
+        for (f in listOf(0x00, 0x01, 0x02, 0x04, 0x05, 0x08, 0x3F)) {
+            assertNull(ReadOnlyPolicy.check(key(0xA4, 0x00, f, agid = 2, dir = DataDirection.IN)), "CSS REPORT KEY ${Hex.byte(f)}h 应放行")
+        }
+        // AACS：AGID、光驱证书 + Challenge、光驱密钥、光驱证书、作废 AGID
+        for (f in listOf(0x00, 0x01, 0x02, 0x38, 0x3F)) {
+            assertNull(ReadOnlyPolicy.check(key(0xA4, 0x02, f, dir = DataDirection.IN)), "AACS REPORT KEY ${Hex.byte(f)}h 应放行")
+        }
+        assertTrue(ReadOnlyPolicy.check(key(0xA4, 0x00, 0x11, dir = DataDirection.IN)) != null)
+        assertTrue(ReadOnlyPolicy.check(key(0xA4, 0x02, 0x08, dir = DataDirection.IN)) != null)
+        assertTrue(ReadOnlyPolicy.check(key(0xA4, 0x02, 0x20, dir = DataDirection.IN)) != null) // 绑定随机数：用不到
+        assertTrue(ReadOnlyPolicy.check(key(0xA4, 0x20, 0x00, dir = DataDirection.IN)) != null) // VCPS
+        assertTrue(ReadOnlyPolicy.check(key(0xA4, 0x00, 0x01, dir = DataDirection.OUT)) != null)
+    }
+
+    @Test
+    fun sendKeyAllowsOnlyAuthenticationAndNeverTheRegionChange() {
+        assertNull(ReadOnlyPolicy.check(key(0xA3, 0x00, 0x01, agid = 1, dir = DataDirection.OUT, len = 16))) // CSS 主机 Challenge
+        assertNull(ReadOnlyPolicy.check(key(0xA3, 0x00, 0x03, agid = 1, dir = DataDirection.OUT, len = 12))) // CSS KEY2
+        assertNull(ReadOnlyPolicy.check(key(0xA3, 0x02, 0x01, dir = DataDirection.OUT, len = 116))) // AACS 主机证书
+        assertNull(ReadOnlyPolicy.check(key(0xA3, 0x02, 0x02, dir = DataDirection.OUT, len = 84))) // AACS 主机密钥
+        assertNull(ReadOnlyPolicy.check(key(0xA3, 0x02, 0x3F, dir = DataDirection.NONE, len = 0))) // 作废 AGID
+        // 设置地区码：不管怎么发都拒绝
+        for (dir in DataDirection.entries) {
+            val r = ReadOnlyPolicy.check(key(0xA3, 0x00, ReadOnlyPolicy.SEND_KEY_RPC, dir = dir, len = if (dir == DataDirection.NONE) 0 else 8))
+            assertTrue(r != null && r.contains("永久禁止"), "SEND KEY 06h 必须拒绝（$dir）：$r")
+        }
+        assertTrue(ReadOnlyPolicy.check(key(0xA3, 0x02, 0x06, dir = DataDirection.OUT)) != null)
+        assertTrue(ReadOnlyPolicy.check(key(0xA3, 0x01, 0x01, dir = DataDirection.OUT)) != null)
+        assertTrue(ReadOnlyPolicy.check(key(0xA3, 0x00, 0x01, dir = DataDirection.IN)) != null)
     }
 
     @Test
@@ -158,12 +196,23 @@ class ReadOnlyPolicyDiscStructureTest {
         }
     }
 
+    private fun bdRds(format: Int, agid: Int = 0) = ScsiCommand.dataIn(
+        ByteArray(12).also { it[0] = 0xAD.toByte(); it[1] = 0x01; it[7] = format.toByte(); it[10] = (agid shl 6).toByte() }, 36, "rds",
+    )
+
     @Test
-    fun keyAndAuthenticationFormatsAreRefused() {
-        // DVD 盘钥 02h、CPRM 06h/07h、AACS 80h–8Fh
-        for (f in listOf(0x02, 0x06, 0x07, 0x80, 0x81, 0x83, 0x84, 0x86, 0x8F)) {
+    fun cssDiscKeyAndBdAacsStructuresAreAllowed() {
+        kotlin.test.assertNull(ReadOnlyPolicy.check(rds(0x02, agid = 2)), "DVD 盘钥")
+        for (f in 0x80..0x84) kotlin.test.assertNull(ReadOnlyPolicy.check(bdRds(f, agid = 1)), "BD 格式 ${Hex.byte(f)}h 应放行")
+    }
+
+    @Test
+    fun otherKeyFormatsAreRefused() {
+        // CPRM 06h/07h；DVD 媒体类型下的 80h–8Fh；BD 的 85h 以后
+        for (f in listOf(0x06, 0x07, 0x80, 0x81, 0x83, 0x84, 0x86, 0x8F)) {
             assertTrue(ReadOnlyPolicy.check(rds(f)) != null, "格式 ${Hex.byte(f)}h 必须被拒绝")
         }
+        for (f in listOf(0x85, 0x86, 0x8F)) assertTrue(ReadOnlyPolicy.check(bdRds(f)) != null, "BD 格式 ${Hex.byte(f)}h 必须被拒绝")
         assertTrue(ReadOnlyPolicy.check(rds(0x00, agid = 1)) != null)
     }
 

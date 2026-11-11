@@ -189,7 +189,7 @@ private fun Titles(
         style = MaterialTheme.typography.bodySmall,
     )
     val protection = when {
-        disc.dvdCopyright?.isCss == true -> "CSS 加密：标题列表可以看，播放要用阶段 3 的解密组件"
+        disc.dvdCopyright?.isCss == true -> "CSS 加密：播放时用导入的 DVD 解密组件向光驱认证"
         info.aacs -> "AACS 加密：标题列表可以看，播放要用阶段 3 的解密组件"
         info.format == VideoFormat.DVD_VIDEO -> "没有加密"
         else -> "没有加密：蓝光播放在 N2.4 加入"

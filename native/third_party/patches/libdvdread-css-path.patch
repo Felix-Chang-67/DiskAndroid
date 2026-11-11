@@ -1,0 +1,20 @@
+diff -ruN a/libdvdread-7.1.1/src/dvd_input.c b/libdvdread-7.1.1/src/dvd_input.c
+--- a/src/dvd_input.c	2026-07-19 00:09:12.000000000 +0000
++++ b/src/dvd_input.c	2026-11-11 03:52:11.375094960 +0000
+@@ -478,7 +478,15 @@
+     dvdcss_library = LoadPackagedLibrary(WIDEN(CSS_LIB), 0);
+ # endif /* WINAPI_PARTITION_DESKTOP */
+ #else
+-  dvdcss_library = dlopen(CSS_LIB, RTLD_LAZY);
++  {
++    /* DiskAndroid: the decryption component is imported by the user into the
++     * app's private directory, so the host passes its absolute path. */
++    const char *psz_css_lib = getenv( "DISKANDROID_DVDCSS" );
++    if( psz_css_lib && *psz_css_lib )
++      dvdcss_library = dlopen( psz_css_lib, RTLD_LAZY );
++    else
++      dvdcss_library = dlopen( CSS_LIB, RTLD_LAZY );
++  }
+ #endif
+ 
+   /* Locate the functions, DVD_V or DVD_A */

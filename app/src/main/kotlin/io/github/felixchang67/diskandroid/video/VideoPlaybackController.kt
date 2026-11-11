@@ -60,6 +60,7 @@ class VideoPlaybackController(
     private val log: DiskLog,
     private val scope: CoroutineScope,
     private val files: DiscBrowser,
+    private val decrypt: DecryptComponents,
 ) {
     /** 播放界面要显示的东西；null = 没在播放（界面应关闭）。 */
     data class Screen(
@@ -89,6 +90,8 @@ class VideoPlaybackController(
         val startTitle: Int,
         val reader: DriveSectorReader,
         val openedAtMs: Long,
+        /** CSS 加密盘（经 DVD 解密组件认证）。 */
+        val css: Boolean,
     ) {
         @Volatile
         var player: DvdPlayer? = null
@@ -170,7 +173,7 @@ class VideoPlaybackController(
 
     /** 不能播放这张盘的原因（null = 可以）。 */
     fun refusal(disc: DiscInfo, content: Set<ContentKind>?): String? = when {
-        disc.dvdCopyright?.isCss == true -> PROTECTED_MESSAGE
+        disc.dvdCopyright?.isCss == true && decrypt.file(DecryptComponents.Kind.CSS) == null -> PROTECTED_MESSAGE
         disc.dvdCopyright?.protectionType == 0x02 -> "这张盘有 CPRM 保护（数字电视录像），暂不支持播放"
         content != null && ContentKind.DVD_VIDEO !in content && (ContentKind.BDMV in content || ContentKind.AVCHD in content) ->
             "蓝光（BDMV）播放在下一个测试节点（N2.4）加入"
@@ -193,6 +196,16 @@ class VideoPlaybackController(
         }
         busyReason()?.let { return it }
         val sectors = disc.capacity?.blocks ?: return "读不到盘片容量"
+        val css = disc.dvdCopyright?.isCss == true
+        if (css) {
+            // CSS：启用用户导入的 DVD 解密组件（libdvdcss），打开盘时它经光驱会话做认证
+            val component = decrypt.file(DecryptComponents.Kind.CSS) ?: return PROTECTED_MESSAGE
+            val problem = NativeBridge.nativeAttachCss(component.path, decrypt.cssCacheDir.path)
+            if (problem != null) {
+                log.w(TAG, "DVD 解密组件加载失败：$problem")
+                return "DVD 解密组件加载失败：$problem"
+            }
+        }
         stop("开始新的播放")
         beforePlay()
         val region = DvdRegion.decide(session.info.value?.rpc, disc.dvdCopyright)
@@ -204,12 +217,15 @@ class VideoPlaybackController(
             startTitle = startTitle,
         )
         val title = label?.takeIf { it.isNotBlank() } ?: "DVD"
-        val c = Current(session, disc, CdPlaybackController.fingerprint(disc), title, startTitle, DriveSectorReader(session, sectors, log), System.currentTimeMillis())
+        val c = Current(
+            session, disc, CdPlaybackController.fingerprint(disc), title, startTitle, DriveSectorReader(session, sectors, log),
+            System.currentTimeMillis(), css,
+        )
         current = c
         log.i(
             TAG, "播放 DVD：${if (startTitle > 0) "直接播放标题 $startTitle" else "从光盘菜单开始"}（$why）",
             "盘" to title, "地区" to region.explanation, "语言" to "菜单 ${options.menuLanguage}，音轨 ${options.audioLanguage}，字幕 ${options.subtitleLanguage}",
-            "原生库" to DvdPlayer.version(),
+            "原生库" to DvdPlayer.version(), "加密" to if (css) "CSS（用 DVD 解密组件认证）" else "无",
         )
         region.warning?.let { log.w(TAG, it) }
         val titleInfo = files.states.value[session]?.video?.info?.titles.orEmpty()
@@ -230,7 +246,7 @@ class VideoPlaybackController(
             if (player == null) {
                 val msg = result.exceptionOrNull()?.message ?: "打不开"
                 log.w(TAG, "打开 DVD 失败：$msg")
-                fail(c, if (c.reader.protectedHit) PROTECTED_MESSAGE else c.reader.fatalReason ?: msg)
+                fail(c, if (c.reader.protectedHit) protectedReason(c) else c.reader.fatalReason ?: msg)
                 return@launch
             }
             c.player = player
@@ -272,7 +288,7 @@ class VideoPlaybackController(
             }
             DvdPlayer.EV_ERROR -> {
                 val reason = when {
-                    c.reader.protectedHit -> PROTECTED_MESSAGE
+                    c.reader.protectedHit -> protectedReason(c)
                     c.reader.fatalReason != null -> "读盘出错：${c.reader.fatalReason}"
                     else -> text ?: "播放出错"
                 }
@@ -280,6 +296,21 @@ class VideoPlaybackController(
                 fail(c, reason)
             }
             else -> poll(c)
+        }
+    }
+
+    /** 光驱拒绝读加密扇区时给用户的说明：没有组件 / 地区不符 / 认证没成功。 */
+    private fun protectedReason(c: Current): String {
+        if (!c.css) return PROTECTED_MESSAGE
+        val sense = c.reader.lastAuthSense
+        return when {
+            sense != null && sense.asc == 0x6F && sense.ascq == 0x04 ->
+                "光驱拒绝认证：盘片地区和光驱地区不符（sense ${sense.code()}）。App 不会修改光驱的地区码。"
+            sense != null && sense.asc == 0x6F && sense.ascq == 0x05 ->
+                "光驱拒绝认证：光驱还没有设置地区（sense ${sense.code()}）。App 不会修改光驱的地区码。"
+            sense != null -> "CSS 认证没有成功，光驱不让读加密的扇区（最后一次认证错误：${sense.describe()}；完整记录在日志的 SCSI 和 CSS 标签里）"
+            c.reader.authCommands.get() == 0L -> "解密组件没有向光驱发认证命令，光驱不让读加密的扇区（日志的 CSS 标签里有原因）"
+            else -> "CSS 认证没有成功，光驱不让读加密的扇区（日志的 SCSI 和 CSS 标签里有完整记录）"
         }
     }
 
@@ -455,6 +486,7 @@ class VideoPlaybackController(
                 "画面" to st?.let { "显示 ${it.framesShown} 帧，丢 ${it.framesDropped} 帧" },
                 "声音" to st?.let { "${it.audioFrames / 48_000} 秒" },
                 "补零扇区" to st?.readErrors,
+                "认证命令" to if (c.css) "${c.reader.authCommands.get()} 条（失败 ${c.reader.authFailures.get()}）" else null,
             )
         }
     }

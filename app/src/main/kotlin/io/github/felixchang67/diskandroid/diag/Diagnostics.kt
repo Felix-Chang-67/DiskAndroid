@@ -25,6 +25,7 @@ object Diagnostics {
         line("生成时间：${LogFormat.isoTime(System.currentTimeMillis())}")
         line("日志会话：${container.sessionId}")
         SystemInfo.lines(context).forEach { line(it) }
+        container.decrypt.describe().forEach { line(it) }
         line()
 
         line("===== USB 设备（${devices.size}）=====")

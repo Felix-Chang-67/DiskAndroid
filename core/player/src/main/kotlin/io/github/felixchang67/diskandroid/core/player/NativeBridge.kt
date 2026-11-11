@@ -13,8 +13,18 @@ import java.nio.ByteBuffer
 interface SectorReader {
     fun read(offset: Long, dst: ByteBuffer, length: Int): Int
 
+    /**
+     * 解密组件（libdvdcss / libaacs）经这里向光驱发认证命令（REPORT KEY / SEND KEY / READ DISC STRUCTURE）。
+     * [dir]：0 无数据、1 光驱 → 主机（结果写进 [data]）、2 主机 → 光驱（发送 [data]）。
+     * 返回 0 = GOOD；> 0 = CHECK CONDITION，sense 原文写进 [sense]，返回值是 sense 长度；< 0 = 没发成（光驱不在、被只读守卫拒绝、传输错误）。
+     */
+    fun scsi(cdb: ByteArray, dir: Int, data: ByteArray?, sense: ByteArray, timeoutMs: Int): Int
+
     companion object {
         const val FATAL = -2
+        const val DIR_NONE = 0
+        const val DIR_IN = 1
+        const val DIR_OUT = 2
     }
 }
 
@@ -66,4 +76,13 @@ object NativeBridge {
     @JvmStatic external fun nativeSetSurface(handle: Long, surface: Surface?)
     @JvmStatic external fun nativeGetState(handle: Long, ints: IntArray, longs: LongArray): Array<String>?
     @JvmStatic external fun nativeClose(handle: Long)
+
+    /** 检查导入的组件能否加载、有没有 [symbol]；null = 没问题，否则是原因。 */
+    @JvmStatic external fun nativeCheckComponent(path: String, symbol: String): String?
+
+    /** 启用 CSS 解密组件（libdvdcss）；[cacheDir] 是标题密钥缓存目录。null = 成功，否则是原因。 */
+    @JvmStatic external fun nativeAttachCss(path: String, cacheDir: String): String?
+
+    /** 停用 CSS 解密组件（删除组件之后）。 */
+    @JvmStatic external fun nativeDetachCss()
 }

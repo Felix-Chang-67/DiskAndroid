@@ -99,6 +99,7 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 },
             )
         }
+        item(key = "decrypt") { DecryptSection(vm.decrypt) { vm.showMessage(it) } }
         if (detached.isNotEmpty()) {
             item(key = "detached-title") {
                 Text("已断开设备的连接报告", style = MaterialTheme.typography.titleSmall)

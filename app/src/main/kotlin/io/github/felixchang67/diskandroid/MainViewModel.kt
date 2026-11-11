@@ -38,6 +38,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val rip = c.rip
     val files = c.files
     val video = c.video
+    val decrypt = c.decrypt
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
@@ -64,6 +65,11 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun onUsbAttachedIntent(device: UsbDevice?) = c.usbMonitor.onAttachedIntent(device)
+
+    /** 界面上弹一条提示。 */
+    fun showMessage(text: String) {
+        _messages.tryEmit(text)
+    }
 
     fun onResume() = c.usbMonitor.refresh("回到前台")
 
