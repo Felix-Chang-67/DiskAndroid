@@ -4,7 +4,7 @@
 > 技术栈：Kotlin + Jetpack Compose，minSdk 29，targetSdk 35，NDK
 > 开发全部在云端容器里完成（你暂时没有电脑可用）；每个可测节点我把 APK 直接发到对话里，你在平板上安装测试、把诊断信息贴回来。
 >
-> 进度：N1.1、N1.2 已在真机通过；N1.3 已完成，等待真机测试（见第 7 节和 `docs/testing/N1.3.md`）。
+> 进度：N1.1 – N2.2 已在真机通过；N2.3（DVD 播放，含光盘菜单）等待真机测试（见第 7 节和 `docs/testing/N2.3.md`）。
 
 ---
 
@@ -294,6 +294,8 @@ GET EVENT STATUS NOTIFICATION 每秒轮询一次（插在读命令之间），�
 
 **N2.3 DVD 播放**
 
+> **实际做法（2026-11-10 调整）：** 你要求"支持播放 DVD / BD 的选单等全部内容"。ExoPlayer 做不了 DVD 的虚拟机、菜单按钮和静止画面，所以改为自写原生播放器：libdvdnav 导航 + FFmpeg 解码 + OpenGL ES 画面 + AAudio 声音（见 7.1 #11、7.15）。下面是原计划，留作对照。
+
 - **DataSource：** 通过 libdvdread 按 PGC 的 cell 顺序读取标题 VOB 扇区。
   - 这条路径到 P3 会自动经过 libdvdcss 解密，不用重写。
 - **自写 PS Extractor：** 拆分 private stream 1 的子流（AC-3 80–87h、DTS 88–8Fh、LPCM A0–A7h、字幕 20–3Fh）。
@@ -421,7 +423,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | libdvdread | 7.1.1 | GPL-2.0+ | meson | APK | `DVDOpenStream2` 回调；libdvdcss 加载方式（预加载，必要时一行补丁） |
 | libdvdnav | 7.0.0 | GPL-2.0+ | meson | APK | `dvdnav_open_stream2` 回调 |
 | libbluray | 1.5.0 | LGPL-2.1+ | meson（关闭 BD-J / Java） | APK | `bd_open_stream` 回调；`LIBAACS_PATH` |
-| FFmpeg | 9.0.2（GitHub 镜像） | LGPL-2.1+（不启用 GPL 组件） | configure | APK | 只编 AC-3 / E-AC-3 / DTS / TrueHD 等音频解码器，供 Media3 decoder_ffmpeg 使用 |
+| FFmpeg | 9.0.2（ffmpeg.org，核对 SHA-256） | LGPL-2.1+（不启用 GPL 组件） | configure | APK | 只编 DVD / BD 要用的解码器（MPEG-1/2、H.264、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD、MP2 / MP3、DVD / BD 的 LPCM、DVD / PGS 字幕）和 bwdif 去隔行，静态链接进自写播放器（N2.3 起，见 7.15） |
 | libdvdcss | 1.6.0 | GPL-2.0+ | meson | **外部组件** | **补丁：回调 SCSI 后端**（stream 模式原本不认证） |
 | libaacs（+ libgcrypt 1.12.4、libgpg-error 1.61） | 0.12.0 | LGPL-2.1+ | autotools | **外部组件** | **补丁：Android MMC 设备后端**；libgpg-error 需为 aarch64-linux-android 生成 lock-obj 头 |
 | libburn / libisofs / libisoburn | 1.5.8 / 1.5.8.pl02 | GPL-2.0+ | autotools | APK（burn 模块） | **新写 `sg-android.c` 系统适配器** |
@@ -484,7 +486,7 @@ N4.x + N1.5 → N5.1 / N5.2
 ### 其他风险
 
 - **R5 Android USB 栈：** `bulkTransfer` 不给 errno；清 HALT 无公开 API；桥接芯片怪癖（提前发 CSW、Get Max LUN 时 STALL、单命令长度上限）；UAS 备用设置；HyperOS 可能对 OTG 有省电策略，需要真机观察。
-- **R6 DVD 菜单与 ExoPlayer 的整合：** 静帧、跳转冲刷、时间戳重定基、按钮高亮。这是 P3 最大的工程风险，所以先做 spike。
+- **R6 DVD 菜单与 ExoPlayer 的整合：** 静帧、跳转冲刷、时间戳重定基、按钮高亮。这是 P3 最大的工程风险，所以先做 spike。→ N2.3 起不用 ExoPlayer，自写播放器直接处理这些（见 7.15），电脑上用 dvdauthor 做的带菜单 DVD 测过。
 - **R7 补丁维护：** libdvdcss / libaacs 的补丁要随上游版本维护；libgcrypt / libgpg-error 交叉编译较繁琐。
 - **R8 外部组件加载：** Android 14+ 要求动态加载的文件为只读；不 root 的平板上用户无法直接往私有目录放文件。→ App 提供"导入组件"（KEYDB.cfg 同理）。
 - **R9 许可证：** libdvdread / libdvdnav / libdvdcss / libburnia 是 GPL；Media3 是 Apache-2.0（与 GPLv2-only 不兼容，与 GPLv3 兼容）。→ 建议整个项目用 GPL-3.0-or-later。自用无影响；若公开发布需开源。
@@ -550,7 +552,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | # | 事项 | 当前做法 |
 |---|---|---|
 | 1 | 构建与安装 | 你暂时没有电脑 → 全部在云端构建；APK 通过对话发送；测试签名放在仓库里，可直接覆盖安装 |
-| 2 | 许可证 | 推迟到 P2 第一次链接 GPL 库（libdvdread）时再加 LICENSE，届时再跟你确认（默认 GPL-3.0-or-later） |
+| 2 | 许可证 | 推迟到 P2 第一次链接 GPL 库（libdvdread）时再加 LICENSE，届时再跟你确认（默认 GPL-3.0-or-later）。**N2.3 起 APK 里静态链接了 libdvdnav / libdvdread（GPL-2.0-or-later），整个 App 按 GPL 处理**；LICENSE 文件等你确认后加（自用不受影响） |
 | 3 | P2 解析方式 | 文件浏览（ISO 9660 / Joliet / Rock Ridge / UDF）用 Kotlin 自写的 `core:fs`（见 #10）。N2.2 的标题识别（DVD 的 IFO、BD / AVCHD 的播放列表）也用 Kotlin 写在 `core:video`，测试里用 lsdvd（libdvdread）和 bd_list_titles（libbluray）的输出逐项核对，挑主片的规则移植自 libbluray。解密（阶段 3）按你的要求用 libdvdcss / libaacs，不自己实现加密算法；N2.3 / N2.4 播放时读流是走 libdvdread / libbluray 还是由 `core:video` 按单元 / 播放项直接读，到 N2.3 按实际效果决定（两种都能接上解密库） |
 | 4 | 阶段顺序 | P3（加密盘）在 P4（刻录）之前，按你原定顺序 |
 | 5 | 解密组件产出 | 你没有电脑编译 → 由我在容器里**单独**编译成独立 .so 文件，**不进 APK**，在对话里单独发给你，你在 App 里用"导入组件"导入 |
@@ -558,6 +560,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | 7 | 包名 | `io.github.felixchang67.diskandroid` |
 | 9 | 曲目信息来源（你在 N1.5 之后提出：日本 CD 基本没有 CD-TEXT，参考 MusicTag 从网易云等平台同步） | 按光盘目录在 MusicBrainz 精确识别（日文原名、发行版本、封面），再到网易云音乐找时长吻合的同一张专辑补中文译名、歌词（含中文翻译）和封面；都查不到时读盘上条码再查，或手动搜索。gnudb（CDDB）要求用开发者邮箱注册应用，未经你同意不使用你的邮箱，所以暂不接入 |
 | 10 | UDF 的实现（N2.1，原计划 libudfread） | 改为纯 Kotlin 的 `core:fs`：libudfread 不支持 VAT（Windows"类似于 USB 闪存驱动器"方式刻的 CD-R / DVD-R / BD-R）和备用表（DVD-RW / CD-RW 包写入），自己写可以都支持，而且不用 NDK、不涉及 GPL。用 genisoimage / pycdlib / mkudffs 做的真实镜像 + 手工拼的 UDF 2.50 元数据分区镜像做测试。N2.2 起 libdvdread / libbluray 读盘时用它们自带的 UDF 解析（通过我们的读扇区回调） |
+| 11 | 视频播放方式（N2.3，你要求"支持播放 DVD / BD 的选单等全部内容"） | **自写原生播放器** `native/diskplayer`：libdvdnav 跑 DVD 的虚拟机（首播、菜单、按钮、跳转、静止画面），FFmpeg 软件解码（这台平板没有 MPEG-2 解码器；AC-3 / DTS / LPCM 也统一软解，音画同步简单可靠），OpenGL ES 3 画面（字幕 / 菜单作为叠加层），AAudio 声音（以音频为主时钟）。不用 ExoPlayer：它没有 DVD 虚拟机，菜单做不了。**不用 libVLC**：官方预编译的 libvlc（3.6.5）把 libdvdcss 静态链接在 libvlc.so 里，等于把解密内置进主 App，违反"解密做成可选外部组件"的要求；自己编 libVLC 去掉 libdvdcss 工作量比自写播放器还大。解密到阶段 3 仍按原计划：libdvdread 运行时加载外部的 libdvdcss。BD（N2.4）用 libbluray：HDMV 菜单可以做；**BD-J 菜单（Java 写的菜单）在 Android 上做不了**（libbluray 的 BD-J 要完整的 Java SE + AWT），这类盘直接播主片 |
 | 8 | 日本盘优先（你在 N1.3 之后提出） | 你主要用日本发行的 CD / DVD / BD（音乐专辑、演唱会 DVD/BD、特典盘）→ 兼容性按日本盘优先（见 7.6）；**N1.5（音乐 CD 播放）提前到 N1.4（读成 ISO）之前** |
 
 ### 7.2 进度
@@ -567,7 +570,8 @@ N4.x + N1.5 → N5.1 / N5.2
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
 | 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
 | 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | ✅ 真机通过（见 7.5） |
-| 2026-11-10 | N2.2 | 0.8.0-N2.2（versionCode 9） | 视频盘的标题识别：新模块 `core:video`（纯 Kotlin）。DVD：读 VIDEO_TS.IFO 和各 VTS_nn_0.IFO（坏了用 .BUP），列出每个标题的时长、章节、单元（扇区范围留给播放用）、角度、视频属性、音轨（格式、语言、声道、流号）和字幕；时长 / 章节算法与 lsdvd 一致。BD / AVCHD：读全部 .mpls，列出时长、章节、剪辑、视频 / 音频 / 字幕流，按 libbluray 的规则过滤重复和循环的播放列表、挑主片。主片可以手动改选。IFO 和播放列表不加密，CSS / AACS 盘也能看标题列表。启动时列出这台平板的 MediaCodec 解码器（MPEG-2、AVC、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD…），写进日志和诊断信息，"视频内容"里标出选中标题缺哪些解码器。修 N2.1 真机发现的卷标乱码：UDF 8 位字符串和 ISO 9660 字段里的 GBK / Shift-JIS / EUC-JP 按"像不像正常文字"打分识别（DVDFab 写的「ヒトリエ」以前显示成「¥Ò¥È¥ê¥¨」）；元数据小文件经缓存读（BD 的几百个播放列表不用一个个寻道）；目录浏览和复制被拒也写日志 | 等待真机测试 |
+| 2026-11-10 | N2.3 | 0.9.0-N2.3（versionCode 10） | **DVD 播放，含光盘菜单**（你要求的全功能）：新模块 `core:player` + 原生库 `native/diskplayer`（见 7.1 #11、7.15）。从光盘自己的首播开始（片头、警告、菜单），菜单按钮高亮，点按按钮 / 拖动选择 / 方向键 / 遥控器；也可以直接播放主片或任意标题。播放中：章节列表、上一章 / 下一章、拖动进度、快退 10 秒 / 快进 30 秒、暂停、光盘菜单 / 标题菜单 / 返回上级、音轨 / 字幕 / 角度切换（显示语言和格式）。MPEG-2 软件解码 + bwdif 去隔行，AC-3 / DTS / LPCM / MPEG 音频，DVD 字幕；字幕按偏好（中文）自动打开，音轨按偏好（日语）在光盘没指定时自动选。读盘经光驱会话（每次 256 KB 预读），读不出的扇区重试后补零继续放；盘片取出、光驱断开立即停止。放入 DVD 视频盘后"2 秒后播放"（可取消，可选从光盘菜单还是直接主片）。**CSS 加密盘提示"该盘有版权保护，需要启用解密组件"**（阶段 3）；地区码只读取，盘片与光驱地区不符时明确提示，不修改光驱设置。全屏横屏、播放中屏幕常亮、音频焦点、拔耳机暂停、离开界面暂停 | 等待真机测试 |
+| 2026-11-10 | N2.2 | 0.8.0-N2.2（versionCode 9） | 视频盘的标题识别：新模块 `core:video`（纯 Kotlin）。DVD：读 VIDEO_TS.IFO 和各 VTS_nn_0.IFO（坏了用 .BUP），列出每个标题的时长、章节、单元（扇区范围留给播放用）、角度、视频属性、音轨（格式、语言、声道、流号）和字幕；时长 / 章节算法与 lsdvd 一致。BD / AVCHD：读全部 .mpls，列出时长、章节、剪辑、视频 / 音频 / 字幕流，按 libbluray 的规则过滤重复和循环的播放列表、挑主片。主片可以手动改选。IFO 和播放列表不加密，CSS / AACS 盘也能看标题列表。启动时列出这台平板的 MediaCodec 解码器（MPEG-2、AVC、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD…），写进日志和诊断信息，"视频内容"里标出选中标题缺哪些解码器。修 N2.1 真机发现的卷标乱码：UDF 8 位字符串和 ISO 9660 字段里的 GBK / Shift-JIS / EUC-JP 按"像不像正常文字"打分识别（DVDFab 写的「ヒトリエ」以前显示成「¥Ò¥È¥ê¥¨」）；元数据小文件经缓存读（BD 的几百个播放列表不用一个个寻道）；目录浏览和复制被拒也写日志 | ✅ 真机通过（见 7.14） |
 | 2026-11-10 | N2.1 | 0.7.0-N2.1（versionCode 8） | 盘上的文件：新模块 `core:fs`（纯 Kotlin）读 ISO 9660 / Joliet / Rock Ridge（含 CE 续接、深层目录重定位、超过 4 GB 的多区段文件）和 UDF 1.02–2.60（物理分区、元数据分区、备用表、VAT + 策略 4096），多区段 CD 读最后一个区段；文字解码 UTF-8 → Shift-JIS → GBK，截断在多字节字符中间也能解；元数据读取按 16 扇区预读并缓存。识别 DVD-Video / DVD-Audio / DVD-VR / BDMV / BDAV / AVCHD / VCD / SVCD 和 AACS 文件夹。界面逐级浏览（日文文件名），复制单个文件 / 文件夹 / 整张盘到保存位置（读不出的扇区重试 3 次后补零并列出；CSS / CPRM / AACS / VCD 不提供）。读成 ISO：卷标改用 UDF / Joliet / 正确解码的 ISO 卷标（修 N1.6 的 9 个下划线）；**可重写盘（DVD+RW、DVD-RW 限制性覆写、DVD-RAM、BD-RE）只读到文件系统结尾**（可改回整张盘）；报告写上文件系统详情和中途的复位次数 | ✅ 真机通过（见 7.12，UDF 卷标乱码 0.8.0 已修） |
 | 2026-11-10 | N1.6（补充） | 0.6.1-N1.6（versionCode 7） | 你要求的 gapless 切歌：自然播到下一首本来就是采样级连续，现在两首都带预加重时去加重滤波器也不在交界处清零；播放中手动切歌（下一首 / 上一首 / 点曲目 / 拖动）不再"停下 → 清空 → 等光驱 → 再播"，而是旧的声音一直播到新位置的数据就绪再直接接上（接缝只做 10 ms 平滑防"啪"声，没有静音、没有长交叉淡化）；缓冲满时趁光驱空闲预读下一首开头约 2.6 秒，按"下一首"不用等寻道；输出缓冲从 0.5 秒减到 0.2 秒，切歌响应更快 | ✅ 真机通过（见 7.10） |
 | 2026-11-10 | N1.4 + N1.6 | 0.6.0-N1.6（versionCode 6） | 读成 ISO：READ(10)（对照 Linux sr.c）；镜像覆盖 LBA 0 到 READ CAPACITY，音轨 / 轨道与区段之间的空隙补零；两遍读取（第 1 遍大块、遇错跳过，第 2 遍逐扇区重试，补读回来的写回原位）；CD 轨道末尾读不出的 2 个 run-out 扇区算间隙；输出 .iso + .log 报告（含 ISO 9660 卷标 / 卷大小核对、MD5 / SHA-1 / CRC32）+ ddrescue 格式 .mapfile；SAF 选目录并持久授权、检查剩余空间、4 GB 写入失败提示 FAT32；前台服务 connectedDevice + 唤醒锁、通知栏进度与取消；取消 / 取盘 / 断开时保留已读部分并在 mapfile 标出；CSS 加密 DVD 拒绝并说明（需阶段 3 认证），意外遇到 05/6F 立即停止；读盘与播放互斥。整合：新放入的音乐 CD 显示"2 秒后播放"（取消 / 立即播放，可关闭），自动播放 1 秒淡入、手动点歌 30 ms 淡入；读不出的扇区静音前后各 5 ms 淡出 / 淡入；播放、读盘或起转时 USB 断开提示检查供电；日志补充识别结果、歌词、封面 | ✅ 真机通过（见 7.10） |
@@ -702,3 +706,21 @@ N4.x + N1.5 → N5.1 / N5.2
 - **DVD**：VMGI 的标题表（每个标题的标题集、VTS 内标题号、角度数、标题集起始扇区）→ 各 VTSI 的章节表（PGC 号 + 节目号）、节目链（播放时间、节目入口单元、单元的播放时间和扇区、音轨 / 字幕控制字）、视频 / 音频 / 字幕属性。标题时长 = 用到的节目链时长之和；章节时长 = 节目覆盖的单元之和（多角度块只算第一个角度）。音轨流号按节目链的音轨控制字算（lsdvd 直接用序号，第 2 条起会算错，测试里用 ffprobe 核对过）。主片：最长的；差不到 1 秒的几个里优先单元按扇区顺序排列的（结构保护的假标题常把单元打乱），再按标题号。
 - **BD / AVCHD**：播放项（剪辑、入点 / 出点、角度、连接条件）、STN 表（主视频、音频、PG / PiP PG、IG、副音频、副视频、杜比视界）、标记（章节入口）。过滤：同一段剪辑出现 3 次以上的（反盗版的循环播放列表）、与已保留的完全相同的。主片：都超过 30 分钟时依次比章节数（一方不到 2 章且相差超过 5）、分辨率、编码、无损音轨，然后比时长、音轨 / 字幕数——与 libbluray 的 `_pl_guess_main_title` 相同（libbluray 判断无损音轨时误用了声道字段，这里按编码类型）。
 - **测试盘**：`core/video/src/test/fixtures/make_fixtures.sh` 用 ffmpeg + dvdauthor 做三个标题集的 DVD（PAL / NTSC、AC-3 / MP2 / LPCM、多章节、同一 VOB 接两次），保存 lsdvd 的输出；BD 按规范拼（`make_bd_fixture.py`：95 分钟主片、特典、循环播放列表、重复播放列表、菜单），保存 bd_list_titles 的输出。视频数据清零，两个镜像压缩后一共 15 KB。
+
+### 7.14 N2.2 真机结果（2026-11-11，会话 session-20261111-004354，版本 0.8.0）
+
+- **解码器**（这台平板）：没有 MPEG-2 和 VC-1 解码器；H.264 / HEVC 有硬件解码（c2.xring）；AC-3 / E-AC-3 有杜比的厂商解码器；没有 DTS / DTS-HD / TrueHD。→ DVD 的视频必须软件解码（N2.3 用 FFmpeg）。
+- **商业 DVD ×2**（CSS 加密，地区 2，光驱也是地区 2）：都认出了唯一的标题（30:29 / 7 章、27:02 / 4 章，NTSC 16:9，LPCM 立体声）。第二张读 IFO 时预读进了后面加密的 VOB 扇区，出现 2 次 5/6F/03（未认证读加密扇区），不影响结果；之后已改为只在文件范围内预读（提交 d387d8e）。
+- **DVD+RW**（DVDFab 做的）：卷标正确显示「ヒトリエ LIVE at LIQUIDROOM Extra Video」；2 个标题（5:04、4:18），英语 AC-3 + 中文字幕。
+- **BD-ROM**（AACS，UDF 2.50 元数据分区）：主片 00001.mpls（1:43:40，21 章，H.264 1080i，日语 LPCM），另外 2 个短播放列表；读文件系统 7 条命令、0.6 秒。
+
+### 7.15 `native/diskplayer` 说明（N2.3）
+
+- **结构：** 与平台无关的核心（`src/`，C）+ Android 部分（`android/dp_android.c`：JNI、OpenGL ES 3、AAudio）。核心有三个线程：
+  - **导航线程**：所有 libdvdnav 调用都在这里（界面的操作经命令队列送进来）。处理首播、菜单、静止画面（定时 / 一直等按键）、WAIT、跳转（清空解码器）、音轨 / 字幕切换事件；把 DVD 的 2048 字节 MPEG-PS 包拆成视频、音频（AC-3 80h+、DTS 88h+、LPCM A0h+、MPEG C0h+，按"格式 + 物理流号"匹配）和字幕（20h+）；用每个 VOBU 的起止时间把时间戳接成连续时间轴。
+  - **视频线程**：FFmpeg 解 MPEG-2（2 线程），隔行的帧过 bwdif（每场一帧），按时钟显示，晚 120 ms 以上的帧丢掉；字幕和菜单高亮合成为 RGBA 叠加层（DVD 字幕的 RLE、调色板、对比度、按钮高亮区的颜色和透明度）。
+  - **音频线程**：FFmpeg 解码 → 重采样为 48 kHz 立体声 16 位 → AAudio。音频是主时钟（按 AAudio 时间戳推算扬声器正在放的那一帧），没有音频时用系统时钟。
+- **读盘：** libdvdread 的流回调 → 原生预读缓存（256 KB）→ JNI 回调 Kotlin → 光驱会话 READ(10)。读不出的块逐扇区重读，仍读不出的扇区补零并记日志；盘片取出 / 光驱断开 / 光驱拒绝读加密扇区时立即停止。
+- **第三方库：** `native/third_party/build.sh` 下载固定版本的源码（核对 SHA-256），编成静态库（arm64 + 电脑上测试用的 x86_64）。libdvdcss / libaacs 不在里面（阶段 3 的外部组件）。`core:player` 编译时缺这些库会先自动运行它（要联网，几分钟）。
+- **测试：** `native/diskplayer/test/run_host_tests.sh` 在电脑上用 ffmpeg + spumux + dvdauthor 做一张带菜单的 DVD（首播 → 主菜单两个按钮 → 两个标题，标题 1 有日语 AC-3 + 英语 LPCM 两条音轨和 3 个章节，播完回菜单），在 AddressSanitizer / UBSan 下跑完整流程：菜单静止画面、按钮高亮颜色、方向键移动高亮、确定、触摸选择、播放到第 3 章、AC-3 和 LPCM 解码、按语言偏好选音轨、手动换音轨、读盘统计。Android 部分（JNI、EGL、AAudio）容器里没有模拟器，只能真机验证。
+

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.DiskAndroid" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- 视频播放界面：黑底，没有标题栏 -->
+    <style name="Theme.DiskAndroid.Player" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

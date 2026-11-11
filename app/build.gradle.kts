@@ -23,12 +23,12 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // 每个测试节点递增 versionCode，保证可以直接覆盖安装。
-        versionCode = 9
-        versionName = "0.8.0-N2.2"
+        versionCode = 10
+        versionName = "0.9.0-N2.3"
 
         buildConfigField("String", "GIT_SHA", "\"$gitSha${if (gitDirty) "+dirty" else ""}\"")
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
-        buildConfigField("String", "TEST_NODE", "\"N2.2\"")
+        buildConfigField("String", "TEST_NODE", "\"N2.3\"")
 
         ndk { abiFilters += "arm64-v8a" }
     }
@@ -89,6 +89,7 @@ dependencies {
     implementation(project(":core:meta"))
     implementation(project(":core:rip"))
     implementation(project(":core:video"))
+    implementation(project(":core:player"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

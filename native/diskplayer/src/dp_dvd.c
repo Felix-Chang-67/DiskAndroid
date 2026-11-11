@@ -298,6 +298,21 @@ static int v_build_graph(vstate *v, const AVFrame *f) {
     return 0;
 }
 
+static void v_present(dp_dvd *d, vstate *v, AVFrame *f, bool force);
+
+/*
+ * 视频线程空着（队列没数据、暂停、等时间到）时：让平台处理窗口更换（界面的 Surface 销毁 / 重建），
+ * 界面要求重画（回到播放界面、叠加层变了）时把上一帧再画一次。
+ */
+static void v_idle(dp_dvd *d, vstate *v) {
+    if (d->pf.video_idle) d->pf.video_idle(d->pf.opaque);
+    pthread_mutex_lock(&d->vlock);
+    bool refresh = d->refresh;
+    d->refresh = false;
+    pthread_mutex_unlock(&d->vlock);
+    if (refresh && v->last->data[0]) v_present(d, v, v->last, true);
+}
+
 /* 按时钟等到该显示的时候；返回 false 表示太晚了要丢掉，或者要退出 / 清空了。 */
 static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
     if (!d->pf.realtime) return true;
@@ -305,6 +320,7 @@ static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
     for (;;) {
         if (d->quit || d->flush_gen != gen) return false;
         if (clock_paused(d)) {
+            v_idle(d, v);
             dp_sleep_us(10000);
             continue;
         }
@@ -326,7 +342,11 @@ static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
             return true;
         }
         int64_t us = diff * 100 / 9;
-        dp_sleep_us(us > 10000 ? 10000 : us);
+        if (us > 10000) {
+            v_idle(d, v);
+            us = 10000;
+        }
+        dp_sleep_us(us);
     }
 }
 
@@ -458,13 +478,8 @@ static void *video_thread(void *arg) {
     while (!d->quit) {
         dp_packet *p = dp_queue_get(&d->vq, 20);
         if (!p) {
-            if (d->pf.video_idle) d->pf.video_idle(d->pf.opaque);
-            /* 没有新帧（静止画面、暂停）：叠加层变了就把最后一帧重画一次 */
-            pthread_mutex_lock(&d->vlock);
-            bool refresh = d->refresh;
-            d->refresh = false;
-            pthread_mutex_unlock(&d->vlock);
-            if (refresh && v.last->data[0]) v_present(d, &v, v.last, true);
+            /* 没有新帧（静止画面、暂停）：窗口变了、叠加层变了就把最后一帧重画一次 */
+            v_idle(d, &v);
             continue;
         }
         switch (p->kind) {

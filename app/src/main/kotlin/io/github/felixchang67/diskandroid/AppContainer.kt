@@ -51,6 +51,7 @@ class AppContainer(val app: Application) {
     val outputFolder: OutputFolder
     val files: DiscBrowser
     val rip: RipController
+    val video: io.github.felixchang67.diskandroid.video.VideoPlaybackController
 
     /** 上一个会话的警告 / 错误（启动时读取一次）。 */
     var previousSessionIssues: PreviousSession.Issues? = null
@@ -70,6 +71,15 @@ class AppContainer(val app: Application) {
         files = DiscBrowser(app, log, mainScope, outputFolder)
         rip = RipController(app, log, mainScope, outputFolder, files)
         files.otherJobRunning = { rip.running }
+        video = io.github.felixchang67.diskandroid.video.VideoPlaybackController(app, log, mainScope, files)
+        video.busyReason = {
+            when {
+                rip.running -> "正在读盘，读完（或取消）之后才能播放"
+                files.copying -> "正在从盘上复制文件，复制完（或取消）之后才能播放"
+                else -> null
+            }
+        }
+        video.beforePlay = { player.stop() }
     }
 
     fun start() {
@@ -84,11 +94,13 @@ class AppContainer(val app: Application) {
         driveManager.start()
         metadata.start(driveManager.drives)
         player.titleResolver = { disc, n -> metadata.metadataFor(disc)?.track(n)?.title }
-        player.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible) { rip.running || files.copying }
+        player.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible) { rip.running || files.copying || video.playing }
+        video.watchForAutoplay(driveManager.drives.map { it.values.map { d -> d.session } }, uiVisible)
         driveManager.busyDescriber = { session ->
             when {
                 rip.running && rip.state.value?.session === session -> "读盘"
                 files.copying && files.copy.value?.session === session -> "复制文件"
+                video.isPlaying(session) && video.screen.value?.state?.paused == false -> "播放视频"
                 player.current.value?.session === session && player.state.value?.let { it.active && it.status != io.github.felixchang67.diskandroid.core.cdda.PlayerState.Status.PAUSED } == true -> "播放"
                 else -> null
             }

@@ -37,12 +37,14 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
     val metadata = c.metadata
     val rip = c.rip
     val files = c.files
+    val video = c.video
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     init {
         viewModelScope.launch { c.driveManager.messages.collect { _messages.tryEmit(it) } }
+        viewModelScope.launch { c.video.messages.collect { _messages.tryEmit(it) } }
         viewModelScope.launch {
             c.usbMonitor.events.collect { event ->
                 when (event) {
@@ -99,6 +101,18 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
         c.player.play(drive.session, disc, track)
     }
 
+    /** 播放这台光驱里的 DVD：[startTitle] = 0 从光盘菜单开始，> 0 直接播放这个标题。 */
+    fun playVideo(deviceName: String, startTitle: Int) {
+        val drive = c.driveManager.drives.value[deviceName]
+        val disc = drive?.session?.disc?.value
+        if (drive == null || disc == null) {
+            _messages.tryEmit("光驱或盘片已经不在了")
+            return
+        }
+        val label = c.files.states.value[drive.session]?.info?.volume?.label
+        c.video.play(drive.session, disc, startTitle, label, "用户点了播放")?.let { _messages.tryEmit(it) }
+    }
+
     /** 把盘上的文件 / 文件夹复制到保存位置。 */
     fun startCopy(deviceName: String, entries: List<io.github.felixchang67.diskandroid.core.fs.DiscEntry>) {
         val drive = c.driveManager.drives.value[deviceName]
@@ -107,7 +121,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
             _messages.tryEmit("光驱或盘片已经不在了")
             return
         }
-        c.files.startCopy(drive.session, disc, entries) { c.player.stop() }?.let { _messages.tryEmit(it) }
+        c.files.startCopy(drive.session, disc, entries) { stopPlayback("开始复制文件") }?.let { _messages.tryEmit(it) }
     }
 
     /** 把这台光驱当前的盘读成 ISO。 */
@@ -119,7 +133,12 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
             return
         }
         val fingerprint = io.github.felixchang67.diskandroid.player.CdPlaybackController.fingerprint(disc)
-        c.rip.start(drive.session, disc, fingerprint, options) { c.player.stop() }?.let { _messages.tryEmit(it) }
+        c.rip.start(drive.session, disc, fingerprint, options) { stopPlayback("开始读盘") }?.let { _messages.tryEmit(it) }
+    }
+
+    private fun stopPlayback(reason: String) {
+        c.player.stop()
+        c.video.stop(reason)
     }
 
     fun logSnapshot(): List<LogRecord> = c.ring.snapshot()

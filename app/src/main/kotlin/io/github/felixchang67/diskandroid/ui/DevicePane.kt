@@ -91,7 +91,7 @@ fun DevicePane(vm: MainViewModel, actions: MainActions, modifier: Modifier = Mod
                 onRefresh = { vm.refreshDrive(d.deviceName) },
                 discExtras = { session, disc ->
                     if (disc.hasAudio) CdPlayerSection(session, disc, vm.player, vm.metadata) { track -> vm.playTrack(d.deviceName, track) }
-                    VideoSection(session, disc, vm.files)
+                    VideoSection(session, disc, vm.files, vm.video) { title -> vm.playVideo(d.deviceName, title) }
                     if (vm.files.browsable(disc)) DiscFilesSection(session, disc, vm.files) { entries -> vm.startCopy(d.deviceName, entries) }
                     if (disc.dataTracks.isNotEmpty() || disc.family != io.github.felixchang67.diskandroid.core.mmc.MmcNames.DiscFamily.CD) {
                         RipSection(session, disc, vm.rip, vm.files) { options -> vm.startRip(d.deviceName, options) }

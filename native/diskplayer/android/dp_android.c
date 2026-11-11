@@ -88,6 +88,9 @@ typedef struct {
     int tex_w[3], tex_h[3];
     int ov_w, ov_h;
     bool ov_valid;
+    uint8_t *ov_pm;               /* 叠加层的预乘 alpha 副本（线性过滤时字幕边缘不发黑） */
+    size_t ov_pm_size;
+    bool egl_failed;              /* 这个窗口上 EGL 建不起来：等换了窗口再试，不要每帧重试刷日志 */
     int surf_w, surf_h;
     /* 最近一帧的显示比例（给界面把触摸点换算成视频坐标） */
     volatile int disp_w, disp_h, frame_w, frame_h;
@@ -147,7 +150,7 @@ static const char *FS =
     "  float u = texture(tu, v_uv).r - 0.5;\n"
     "  float v = texture(tv, v_uv).r - 0.5;\n"
     "  vec3 rgb = vec3(y + 1.59603 * v, y - 0.39176 * u - 0.81297 * v, y + 2.01723 * u);\n"
-    "  if (has_ov == 1) { vec4 o = texture(tov, v_uv); rgb = mix(rgb, o.rgb, o.a); }\n"
+    "  if (has_ov == 1) { vec4 o = texture(tov, v_uv); rgb = rgb * (1.0 - o.a) + o.rgb; }\n"
     "  color = vec4(clamp(rgb, 0.0, 1.0), 1.0);\n"
     "}\n";
 
@@ -165,12 +168,12 @@ static GLuint compile(GLenum type, const char *src) {
     return s;
 }
 
+/* 拆掉 EGL 表面和上下文。不调 eglTerminate：默认 display 是整个进程共用的（界面的硬件绘制也在用）。 */
 static void gl_teardown(jplayer *p) {
     if (p->egl_dpy == EGL_NO_DISPLAY || !p->egl_dpy) return;
     eglMakeCurrent(p->egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (p->egl_surf != EGL_NO_SURFACE) eglDestroySurface(p->egl_dpy, p->egl_surf);
     if (p->egl_ctx != EGL_NO_CONTEXT) eglDestroyContext(p->egl_dpy, p->egl_ctx);
-    eglTerminate(p->egl_dpy);
     p->egl_dpy = EGL_NO_DISPLAY;
     p->egl_ctx = EGL_NO_CONTEXT;
     p->egl_surf = EGL_NO_SURFACE;
@@ -188,6 +191,7 @@ static void gl_check_window(jplayer *p) {
         if (p->cur_window) ANativeWindow_release(p->cur_window);
         p->cur_window = p->window;
         if (p->cur_window) ANativeWindow_acquire(p->cur_window);
+        p->egl_failed = false;
         pthread_cond_broadcast(&p->win_cond);
     }
     pthread_mutex_unlock(&p->win_lock);
@@ -199,25 +203,33 @@ static bool gl_ensure(jplayer *p) {
     pthread_mutex_lock(&p->win_lock);
     ANativeWindow *win = p->cur_window;
     pthread_mutex_unlock(&p->win_lock);
-    if (!win) return false;
+    if (!win || p->egl_failed) return false;
     if (p->egl_surf != EGL_NO_SURFACE && p->egl_dpy) return true;
 
     p->egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    eglInitialize(p->egl_dpy, NULL, NULL);
+    if (p->egl_dpy == EGL_NO_DISPLAY || !eglInitialize(p->egl_dpy, NULL, NULL)) {
+        dp_log(DP_LOG_ERROR, "VIDEO", "EGL 初始化失败：0x%x", eglGetError());
+        p->egl_dpy = EGL_NO_DISPLAY;
+        p->egl_failed = true;
+        return false;
+    }
     const EGLint attrs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
                             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
     EGLConfig cfg;
     EGLint n = 0;
     if (!eglChooseConfig(p->egl_dpy, attrs, &cfg, 1, &n) || n < 1) {
         dp_log(DP_LOG_ERROR, "VIDEO", "EGL 找不到可用的配置");
+        p->egl_dpy = EGL_NO_DISPLAY;
+        p->egl_failed = true;
         return false;
     }
     const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
     p->egl_ctx = eglCreateContext(p->egl_dpy, cfg, EGL_NO_CONTEXT, ctx_attrs);
     p->egl_surf = eglCreateWindowSurface(p->egl_dpy, cfg, win, NULL);
     if (p->egl_ctx == EGL_NO_CONTEXT || p->egl_surf == EGL_NO_SURFACE || !eglMakeCurrent(p->egl_dpy, p->egl_surf, p->egl_surf, p->egl_ctx)) {
-        dp_log(DP_LOG_ERROR, "VIDEO", "EGL 初始化失败：0x%x", eglGetError());
+        dp_log(DP_LOG_ERROR, "VIDEO", "EGL 表面 / 上下文建不起来：0x%x", eglGetError());
         gl_teardown(p);
+        p->egl_failed = true;
         return false;
     }
     eglSwapInterval(p->egl_dpy, 1);
@@ -228,6 +240,16 @@ static bool gl_ensure(jplayer *p) {
     glLinkProgram(p->prog);
     glDeleteShader(vs);
     glDeleteShader(fs);
+    GLint linked = 0;
+    glGetProgramiv(p->prog, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[512];
+        glGetProgramInfoLog(p->prog, sizeof(log), NULL, log);
+        dp_log(DP_LOG_ERROR, "VIDEO", "着色器链接失败：%s", log);
+        gl_teardown(p);
+        p->egl_failed = true;
+        return false;
+    }
     glUseProgram(p->prog);
     const char *names[4] = {"ty", "tu", "tv", "tov"};
     glGenTextures(4, p->tex);
@@ -279,14 +301,34 @@ static void video_present(void *opaque, const dp_frame *f, const uint32_t *overl
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, p->tex[3]);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        if (p->ov_w != f->width || p->ov_h != f->height) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f->width, f->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, overlay);
-            p->ov_w = f->width;
-            p->ov_h = f->height;
-        } else if (changed || !p->ov_valid) {
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, overlay);
+        bool resize = p->ov_w != f->width || p->ov_h != f->height;
+        if (resize || changed || !p->ov_valid) {
+            /* 预乘 alpha（内存顺序 R、G、B、A） */
+            size_t n = (size_t)f->width * (size_t)f->height;
+            if (p->ov_pm_size < n * 4) {
+                free(p->ov_pm);
+                p->ov_pm = malloc(n * 4);
+                p->ov_pm_size = p->ov_pm ? n * 4 : 0;
+            }
+            if (p->ov_pm) {
+                const uint8_t *src = (const uint8_t *)overlay;
+                for (size_t i = 0; i < n * 4; i += 4) {
+                    unsigned a = src[i + 3];
+                    p->ov_pm[i] = (uint8_t)((src[i] * a + 127) / 255);
+                    p->ov_pm[i + 1] = (uint8_t)((src[i + 1] * a + 127) / 255);
+                    p->ov_pm[i + 2] = (uint8_t)((src[i + 2] * a + 127) / 255);
+                    p->ov_pm[i + 3] = (uint8_t)a;
+                }
+                if (resize) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f->width, f->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
+                    p->ov_w = f->width;
+                    p->ov_h = f->height;
+                } else {
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
+                }
+            }
         }
-        p->ov_valid = true;
+        p->ov_valid = p->ov_pm != NULL;
     } else {
         p->ov_valid = false;
     }
@@ -308,7 +350,7 @@ static void video_present(void *opaque, const dp_frame *f, const uint32_t *overl
     glViewport(vx, vy, vw, vh);
     const float quad[] = {-1, -1, 0, 1, 1, -1, 1, 1, -1, 1, 0, 0, 1, 1, 1, 0};
     glUseProgram(p->prog);
-    glUniform1i(p->u_has_ov, overlay ? 1 : 0);
+    glUniform1i(p->u_has_ov, overlay && p->ov_valid ? 1 : 0);
     glBindBuffer(GL_ARRAY_BUFFER, p->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STREAM_DRAW);
     glEnableVertexAttribArray(0);
@@ -630,6 +672,7 @@ JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
     pthread_mutex_destroy(&p->win_lock);
     pthread_cond_destroy(&p->win_cond);
     pthread_mutex_destroy(&p->aa_lock);
+    free(p->ov_pm);
     free(p);
 }
 

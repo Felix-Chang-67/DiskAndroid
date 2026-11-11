@@ -10,6 +10,7 @@ import io.github.felixchang67.diskandroid.core.drive.MediaStatus
 import io.github.felixchang67.diskandroid.core.testing.FakeDisc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmc
 import io.github.felixchang67.diskandroid.core.testing.FakeMmcTransport
+import io.github.felixchang67.diskandroid.core.testing.FakeTrack
 import io.github.felixchang67.diskandroid.ui.CdPlayerSection
 import io.github.felixchang67.diskandroid.ui.RipSection
 import kotlinx.coroutines.CoroutineScope
@@ -23,7 +24,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.time.Duration
 import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
 import kotlin.test.assertTrue
 
 @RunWith(RobolectricTestRunner::class)
@@ -106,6 +109,46 @@ class AutoplayAndRipUiTest {
             compose.onNodeWithText("选择文件夹").assertExists()
             compose.onNodeWithText("41.0 MB（20000 扇区）", substring = true).assertExists()
             compose.onNodeWithText("64 扇区").assertExists()
+        }
+    }
+
+    /**
+     * 会话开始后放进去的 DVD 视频盘：读出文件系统确认有 VIDEO_TS 后显示"2 秒后播放"，到时从光盘菜单开始播放。
+     * 电脑上没有 Android 的原生库，打开播放器会报错（界面显示错误），这里验证的是整条自动播放的路径。
+     */
+    @Test
+    fun newlyInsertedDvdVideoAutoplaysFromTheDiscMenu() {
+        val container = ApplicationProvider.getApplicationContext<DiskApp>().container
+        val video = container.video
+        video.nativeProblem = { null }
+        video.setAutoplay(true)
+        val mmc = FakeMmc()
+        withSession(mmc) { session ->
+            video.watchForAutoplay(MutableStateFlow(listOf(session)), MutableStateFlow(true))
+            compose.waitUntil(10_000) {
+                idle()
+                session.media.value is MediaStatus.NoMedium
+            }
+            val img = GZIPInputStream(javaClass.getResourceAsStream("/fixtures/dvd_video.iso.gz")!!).use { it.readBytes() }
+            val sectors = (img.size / 2048).toLong()
+            mmc.insertDisc(FakeDisc(0x10, listOf(FakeTrack(1, 1, 0, sectors, audio = false)), sectors, image = img), spinUpPolls = 2)
+            compose.waitUntil(10_000) {
+                idle()
+                video.autoplay.value?.session === session
+            }
+            assertTrue(container.ring.snapshot().any { it.message.contains("放入了 DVD 视频盘：2 秒后自动播放") })
+            // 不点任何按钮：2 秒后开始播放（Robolectric 的时钟不会自己走，手动拨过 2 秒）
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(2_500))
+            compose.waitUntil(10_000) {
+                idle()
+                video.screen.value?.error != null
+            }
+            assertTrue(video.autoplay.value == null)
+            assertTrue(container.ring.snapshot().any { it.message.contains("播放 DVD：从光盘菜单开始（自动播放）") })
+            assertTrue(video.screen.value!!.error!!.contains("原生库"), video.screen.value!!.error)
+            video.stop("测试结束")
+            idle()
+            assertTrue(video.screen.value == null)
         }
     }
 }
