@@ -23,12 +23,12 @@ android {
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         // 每个测试节点递增 versionCode，保证可以直接覆盖安装。
-        versionCode = 11
-        versionName = "0.9.1-N2.3b"
+        versionCode = 12
+        versionName = "0.10.0-N3"
 
         buildConfigField("String", "GIT_SHA", "\"$gitSha${if (gitDirty) "+dirty" else ""}\"")
         buildConfigField("long", "BUILD_TIME", "${System.currentTimeMillis()}L")
-        buildConfigField("String", "TEST_NODE", "\"N2.3b\"")
+        buildConfigField("String", "TEST_NODE", "\"N3\"")
 
         ndk { abiFilters += "arm64-v8a" }
     }

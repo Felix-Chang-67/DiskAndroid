@@ -365,11 +365,12 @@ GET EVENT STATUS NOTIFICATION 每秒轮询一次（插在读命令之间），�
 - **依赖：** libaacs 依赖 libgcrypt + libgpg-error，交叉编译后静态链入，组件只有一个 `libaacs.so` 文件。
 - **补丁：** 新增 Android MMC 设备后端，把 `device_send_cmd` 转到 host API；`mmc_open(NULL)` 时使用回调设备。这样 libbluray 的 `bd_open_stream` 不用改。
 - **路径：** `XDG_CONFIG_HOME` 指向私有目录（libaacs 在 `$XDG_CONFIG_HOME/aacs/KEYDB.cfg` 找密钥库）；`LIBAACS_PATH` 指向导入的组件（libbluray 1.5.0 原生支持这个环境变量）。
-- **错误分级提示：**
-  - 光驱没有 AACS Feature → "该光驱不支持 AACS"。
-  - 主机认证时返回 CHECK CONDITION → "该光驱不支持此盘的认证"，原始 sense 全量写日志。
-  - AACS 2.0（libaacs 识别为内容证书类型 10h）→ "不支持 AACS 2.0（4K UHD）"。
-  - BD+（libbluray 的 `bdplus_detected`）→ 提示可能花屏（libbdplus 暂不纳入）。
+- **错误分级提示（实际做法见 7.16）：**
+  - 光驱没有 AACS Feature → "该光驱不支持此盘的认证：光驱没有报告 AACS 功能"。
+  - 主机认证时返回 CHECK CONDITION → "该光驱不支持此盘的认证"，界面附光驱返回的 sense，原始 sense 全量写日志。
+  - KEYDB 里没有这张盘的密钥 / 处理密钥 / 主机证书 → 分别说明（带 MKB 版本）。
+  - AACS 2.0（index.bdmv 版本 0300，即 4K UHD；libaacs 自己识别的内容证书类型 10h 也算）→ "不支持 AACS 2.0（4K UHD 蓝光）"，即使 KEYDB 里有密钥也不试。
+  - BD+（libbluray 的 `bdplus_detected`）→ 直接提示不支持（没有 libbdplus 时视频会大片花屏，原计划"提示可能花屏"改为不播）。
 
 **N3.7 BD 主片解密播放**
 
@@ -425,7 +426,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | libbluray | 1.5.0 | LGPL-2.1+ | meson（关闭 BD-J / Java） | APK | `bd_open_stream` 回调；`LIBAACS_PATH` |
 | FFmpeg | 9.0.2（ffmpeg.org，核对 SHA-256） | LGPL-2.1+（不启用 GPL 组件） | configure | APK | 只编 DVD / BD 要用的解码器（MPEG-1/2、H.264、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD、MP2 / MP3、DVD / BD 的 LPCM、DVD / PGS 字幕）和 bwdif 去隔行，静态链接进自写播放器（N2.3 起，见 7.15） |
 | libdvdcss | 1.6.0 | GPL-2.0+ | meson | **外部组件** | **补丁：回调 SCSI 后端**（stream 模式原本不认证） |
-| libaacs（+ libgcrypt 1.12.4、libgpg-error 1.61） | 0.12.0 | LGPL-2.1+ | autotools | **外部组件** | **补丁：Android MMC 设备后端**；libgpg-error 需为 aarch64-linux-android 生成 lock-obj 头 |
+| libaacs（+ libgcrypt 1.12.4、libgpg-error 1.61） | 0.12.0 | LGPL-2.1+ | autotools | **外部组件** | **补丁：MMC 命令经宿主回调发出**（见 7.16）；libgpg-error 的 aarch64 Android 锁对象头文件用源码包自带的 `…-androideabi.h`（复制改名） |
 | libburn / libisofs / libisoburn | 1.5.8 / 1.5.8.pl02 | GPL-2.0+ | autotools | APK（burn 模块） | **新写 `sg-android.c` 系统适配器** |
 | libbdplus | 0.2.0 | LGPL | — | 不纳入 | 只检测并提示 |
 
@@ -511,7 +512,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | N2.1 | 浏览各类数据盘，复制一个文件 / 文件夹；再读一次 N1.6 的 DVD+RW | 日文文件名的 CD-R / DVD、UDF DVD、BD、加强版 CD、Windows"类似于 USB 闪存驱动器"方式刻的盘（如有） | 目录是否正确 + 日志 |
 | N2.2 | 查看主片识别结果，挑错时手动改选 | 演唱会 DVD / BD（加密的也行）、自制 DVD-Video、AVCHD | 主片对不对（不对的话正确的是哪个）+ 日志 |
 | N2.3 | DVD 起播、拖动、切音轨 | 自制 DVD-Video | 起播 / 拖动耗时、解码器列表日志 |
-| N2.4 | BD 起播、拖动 | 自制 BDMV | 同上 |
+| N2.4 | BD 起播、拖动 | 自制 BDMV（你没有未加密的 BD → 和 N3.6–N3.7 一起用商业 BD 测） | 同上 |
 | N2.5 | 三类盘的插盘自动行为 | 音乐 CD / DVD / 数据盘 | 是否符合规则 |
 | N3.0 | 切到 libusb 后端重测 N1.4 | 同 N1.4 | 两种后端的吞吐与稳定性对比 |
 | N3.1 | 未导入组件时插加密盘；导入组件 | 商业 DVD / BD | 提示截图 + 日志 |
@@ -561,6 +562,7 @@ N4.x + N1.5 → N5.1 / N5.2
 | 9 | 曲目信息来源（你在 N1.5 之后提出：日本 CD 基本没有 CD-TEXT，参考 MusicTag 从网易云等平台同步） | 按光盘目录在 MusicBrainz 精确识别（日文原名、发行版本、封面），再到网易云音乐找时长吻合的同一张专辑补中文译名、歌词（含中文翻译）和封面；都查不到时读盘上条码再查，或手动搜索。gnudb（CDDB）要求用开发者邮箱注册应用，未经你同意不使用你的邮箱，所以暂不接入 |
 | 10 | UDF 的实现（N2.1，原计划 libudfread） | 改为纯 Kotlin 的 `core:fs`：libudfread 不支持 VAT（Windows"类似于 USB 闪存驱动器"方式刻的 CD-R / DVD-R / BD-R）和备用表（DVD-RW / CD-RW 包写入），自己写可以都支持，而且不用 NDK、不涉及 GPL。用 genisoimage / pycdlib / mkudffs 做的真实镜像 + 手工拼的 UDF 2.50 元数据分区镜像做测试。N2.2 起 libdvdread / libbluray 读盘时用它们自带的 UDF 解析（通过我们的读扇区回调） |
 | 11 | 视频播放方式（N2.3，你要求"支持播放 DVD / BD 的选单等全部内容"） | **自写原生播放器** `native/diskplayer`：libdvdnav 跑 DVD 的虚拟机（首播、菜单、按钮、跳转、静止画面），FFmpeg 软件解码（这台平板没有 MPEG-2 解码器；AC-3 / DTS / LPCM 也统一软解，音画同步简单可靠），OpenGL ES 3 画面（字幕 / 菜单作为叠加层），AAudio 声音（以音频为主时钟）。不用 ExoPlayer：它没有 DVD 虚拟机，菜单做不了。**不用 libVLC**：官方预编译的 libvlc（3.6.5）把 libdvdcss 静态链接在 libvlc.so 里，等于把解密内置进主 App，违反"解密做成可选外部组件"的要求；自己编 libVLC 去掉 libdvdcss 工作量比自写播放器还大。解密到阶段 3 仍按原计划：libdvdread 运行时加载外部的 libdvdcss。BD（N2.4）用 libbluray：HDMV 菜单可以做；**BD-J 菜单（Java 写的菜单）在 Android 上做不了**（libbluray 的 BD-J 要完整的 Java SE + AWT），这类盘直接播主片 |
+| 12 | 阶段 3 的解密组件（你在 N2.3 之后要求"直接连着做完阶段三的 DVD / BD 解密"） | libdvdcss 1.6.0、libaacs 0.12.0（+ libgcrypt 1.12.4、libgpg-error 1.61，静态链接进同一个 .so）各打一个补丁：认证命令经 App 的回调发给光驱（`dc_host.h`），照样过只读守卫和命令日志；组件自己的日志转给 App，密钥 / 证书打码。组件在容器里单独编译、单独发给你，**不进 APK、不进仓库**；导入时检查是 arm64 ELF、能加载、有 `dvdcss_set_host` / `aacs_set_host`，保存为只读文件。KEYDB.cfg 由你自己准备并导入（`files/aacs-config/aacs/KEYDB.cfg`）。删除组件或 KEYDB 时连同缓存的密钥一起删。不支持 AACS 2.0（4K UHD）和 BD+，遇到直接提示 |
 | 8 | 日本盘优先（你在 N1.3 之后提出） | 你主要用日本发行的 CD / DVD / BD（音乐专辑、演唱会 DVD/BD、特典盘）→ 兼容性按日本盘优先（见 7.6）；**N1.5（音乐 CD 播放）提前到 N1.4（读成 ISO）之前** |
 
 ### 7.2 进度
@@ -570,7 +572,8 @@ N4.x + N1.5 → N5.1 / N5.2
 | 2026-11-09 | P0 + N1.1 | 0.1.0-N1.1（versionCode 1） | 工程骨架（Gradle 9.9 / AGP 9.5 / Kotlin 2.4 / Compose）、日志系统（内存环形缓冲 + 会话文件 .log/.jsonl + logcat，崩溃与上次退出原因记录，复制/导出/分享）、USB 枚举 / 热插拔 / 权限、BOT 接口选择（兼容 UAS 备用设置与子类 02/05）、原始描述符解析、usbfs ioctl 小 JNI（链路速度、能力、内核驱动、CLEAR_HALT、RESET）、"连接测试"（占用接口 + Get Max LUN） | ✅ 真机通过（见下） |
 | 2026-11-09 | N1.2 | 0.2.0-N1.2（versionCode 2） | Bulk-Only Transport（CBW/CSW、自动 REQUEST SENSE、STALL/0 长度 CSW/跳过数据阶段/Phase Error 处理、复位恢复，参照 BOT 规范与 Linux usb-storage）；命令日志（CDB/sense hex + T10 官方 ASC/ASCQ 表解码 + 中文提示，轮询去重）；只读白名单守卫；INQUIRY、TUR、GET CONFIGURATION、MODE SENSE 2Ah、GESN、MECHANISM STATUS、REPORT KEY（RPC）、弹出；光驱会话与盘片状态机（UNIT ATTENTION、两次轮询间换盘、会话中途复位 → 供电提示）；自动连接 / 拔出释放；插入过滤器收窄到 0411:036D；诊断信息含原始响应 hex、上一个会话的警告/错误 | ✅ 真机通过（见 7.4） |
 | 2026-11-09 | N1.3 | 0.3.0-N1.3（versionCode 3） | 盘片信息：READ CAPACITY、READ DISC INFORMATION、READ TOC 格式 0/1/2、READ TRACK INFORMATION、READ DISC STRUCTURE（DVD 物理/版权、BD DI）、GET PERFORMANCE；变长响应一律先读头再按确切长度读；CD-Extra 用完整 TOC 的区段 lead-out 定第 1 区段最后一轨结尾；DVD 盘片地区与光驱 RPC 不符时提前提示；守卫拦截密钥类盘片结构格式与写入性能类型；修正 N1.2 发现的问题（托盘事件重复、Lock 位误读、MODE SENSE STALL、AACS 位定义、读完整 INQUIRY）；用 N1.2 真机原始响应建立回放测试 | ✅ 真机通过（见 7.5） |
-| 2026-11-11 | N2.3b | 0.9.1-N2.3b（versionCode 11） | 你反馈播放没加密的 DVD 有卡顿。日志里读盘正常（播放中单次读取中位数 4 ms、最长 214 ms，没有读错，缓冲有好几秒），所以从画面节奏和声音两方面改：告诉系统视频帧率（Android 11+ 的 setFrameRate，让 144 Hz 屏切到能整除 29.97 帧的刷新率，不再每帧交替停 4 / 5 个刷新周期）；提前 12 ms 交出画面并带上应显示的时刻（EGL_ANDROID_presentation_time），由系统对准刷新；音频线程、画面线程提高优先级；AAudio 缓冲开到最大，记录欠载次数；**每 10 秒写一条播放统计**（帧率、丢帧、晚到的帧、相邻帧最长间隔、解码耗时、队列、时钟来源、音频欠载、读盘耗时），下次能从日志直接看出卡在哪 | 等待真机测试 |
+| 2026-11-11 | N2.4 + N3 | 0.10.0-N3（versionCode 12） | **蓝光播放（全功能）**：`native/diskplayer` 新增 `dp_bd`（libbluray 导航：First Play、顶层菜单、弹出菜单、HDMV 按钮（IG）和字幕（PG）由 libbluray 解码后作为叠加层合成、标题 / 播放列表 / 章节、音轨 / 字幕 / 角度切换、静止画面、BD-J 盘自动改为直接播放主片），M2TS 解复用（192 字节源包，按 PID 组 PES，TrueHD 里的 AC-3 核心跳过），解码 / 显示 / 音画同步抽成 DVD 和蓝光共用的 `dp_av`（任意视频 / 音频格式：H.264、HEVC、VC-1、MPEG-2、AC-3、E-AC-3、DTS(-HD)、TrueHD、LPCM）。播放界面加"顶层菜单""弹出菜单"、直接播放时的播放列表选择、实际解码器名。**阶段 3**：DVD 的 CSS（libdvdcss 组件）和蓝光的 AACS（libaacs 组件 + 你的 KEYDB.cfg），见 7.1 #12、7.16；各种失败都有明确提示（缺组件 / KEYDB、地区不符、光驱拒绝认证并附 sense、KEYDB 里没有这张盘、AACS 2.0、BD+）。另含 N2.3b 的 DVD 卡顿改进和播放统计（N2.3b 没有单独发） | 等待真机测试 |
+| 2026-11-11 | N2.3b | 0.9.1-N2.3b（versionCode 11） | 你反馈播放没加密的 DVD 有卡顿。日志里读盘正常（播放中单次读取中位数 4 ms、最长 214 ms，没有读错，缓冲有好几秒），所以从画面节奏和声音两方面改：告诉系统视频帧率（Android 11+ 的 setFrameRate，让 144 Hz 屏切到能整除 29.97 帧的刷新率，不再每帧交替停 4 / 5 个刷新周期）；提前 12 ms 交出画面并带上应显示的时刻（EGL_ANDROID_presentation_time），由系统对准刷新；音频线程、画面线程提高优先级；AAudio 缓冲开到最大，记录欠载次数；**每 10 秒写一条播放统计**（帧率、丢帧、晚到的帧、相邻帧最长间隔、解码耗时、队列、时钟来源、音频欠载、读盘耗时），下次能从日志直接看出卡在哪 | 合并进 0.10.0-N3 一起测 |
 | 2026-11-10 | N2.3 | 0.9.0-N2.3（versionCode 10） | **DVD 播放，含光盘菜单**（你要求的全功能）：新模块 `core:player` + 原生库 `native/diskplayer`（见 7.1 #11、7.15）。从光盘自己的首播开始（片头、警告、菜单），菜单按钮高亮，点按按钮 / 拖动选择 / 方向键 / 遥控器；也可以直接播放主片或任意标题。播放中：章节列表、上一章 / 下一章、拖动进度、快退 10 秒 / 快进 30 秒、暂停、光盘菜单 / 标题菜单 / 返回上级、音轨 / 字幕 / 角度切换（显示语言和格式）。MPEG-2 软件解码 + bwdif 去隔行，AC-3 / DTS / LPCM / MPEG 音频，DVD 字幕；字幕按偏好（中文）自动打开，音轨按偏好（日语）在光盘没指定时自动选。读盘经光驱会话（每次 256 KB 预读），读不出的扇区重试后补零继续放；盘片取出、光驱断开立即停止。放入 DVD 视频盘后"2 秒后播放"（可取消，可选从光盘菜单还是直接主片）。**CSS 加密盘提示"该盘有版权保护，需要启用解密组件"**（阶段 3）；地区码只读取，盘片与光驱地区不符时明确提示，不修改光驱设置。全屏横屏、播放中屏幕常亮、音频焦点、拔耳机暂停、离开界面暂停 | ✅ 真机能播放，有卡顿（见 N2.3b） |
 | 2026-11-10 | N2.2 | 0.8.0-N2.2（versionCode 9） | 视频盘的标题识别：新模块 `core:video`（纯 Kotlin）。DVD：读 VIDEO_TS.IFO 和各 VTS_nn_0.IFO（坏了用 .BUP），列出每个标题的时长、章节、单元（扇区范围留给播放用）、角度、视频属性、音轨（格式、语言、声道、流号）和字幕；时长 / 章节算法与 lsdvd 一致。BD / AVCHD：读全部 .mpls，列出时长、章节、剪辑、视频 / 音频 / 字幕流，按 libbluray 的规则过滤重复和循环的播放列表、挑主片。主片可以手动改选。IFO 和播放列表不加密，CSS / AACS 盘也能看标题列表。启动时列出这台平板的 MediaCodec 解码器（MPEG-2、AVC、HEVC、VC-1、AC-3、E-AC-3、DTS、TrueHD…），写进日志和诊断信息，"视频内容"里标出选中标题缺哪些解码器。修 N2.1 真机发现的卷标乱码：UDF 8 位字符串和 ISO 9660 字段里的 GBK / Shift-JIS / EUC-JP 按"像不像正常文字"打分识别（DVDFab 写的「ヒトリエ」以前显示成「¥Ò¥È¥ê¥¨」）；元数据小文件经缓存读（BD 的几百个播放列表不用一个个寻道）；目录浏览和复制被拒也写日志 | ✅ 真机通过（见 7.14） |
 | 2026-11-10 | N2.1 | 0.7.0-N2.1（versionCode 8） | 盘上的文件：新模块 `core:fs`（纯 Kotlin）读 ISO 9660 / Joliet / Rock Ridge（含 CE 续接、深层目录重定位、超过 4 GB 的多区段文件）和 UDF 1.02–2.60（物理分区、元数据分区、备用表、VAT + 策略 4096），多区段 CD 读最后一个区段；文字解码 UTF-8 → Shift-JIS → GBK，截断在多字节字符中间也能解；元数据读取按 16 扇区预读并缓存。识别 DVD-Video / DVD-Audio / DVD-VR / BDMV / BDAV / AVCHD / VCD / SVCD 和 AACS 文件夹。界面逐级浏览（日文文件名），复制单个文件 / 文件夹 / 整张盘到保存位置（读不出的扇区重试 3 次后补零并列出；CSS / CPRM / AACS / VCD 不提供）。读成 ISO：卷标改用 UDF / Joliet / 正确解码的 ISO 卷标（修 N1.6 的 9 个下划线）；**可重写盘（DVD+RW、DVD-RW 限制性覆写、DVD-RAM、BD-RE）只读到文件系统结尾**（可改回整张盘）；报告写上文件系统详情和中途的复位次数 | ✅ 真机通过（见 7.12，UDF 卷标乱码 0.8.0 已修） |
@@ -724,4 +727,24 @@ N4.x + N1.5 → N5.1 / N5.2
 - **读盘：** libdvdread 的流回调 → 原生预读缓存（256 KB）→ JNI 回调 Kotlin → 光驱会话 READ(10)。读不出的块逐扇区重读，仍读不出的扇区补零并记日志；盘片取出 / 光驱断开 / 光驱拒绝读加密扇区时立即停止。
 - **第三方库：** `native/third_party/build.sh` 下载固定版本的源码（核对 SHA-256），编成静态库（arm64 + 电脑上测试用的 x86_64）。libdvdcss / libaacs 不在里面（阶段 3 的外部组件）。`core:player` 编译时缺这些库会先自动运行它（要联网，几分钟）。
 - **测试：** `native/diskplayer/test/run_host_tests.sh` 在电脑上用 ffmpeg + spumux + dvdauthor 做一张带菜单的 DVD（首播 → 主菜单两个按钮 → 两个标题，标题 1 有日语 AC-3 + 英语 LPCM 两条音轨和 3 个章节，播完回菜单），在 AddressSanitizer / UBSan 下跑完整流程：菜单静止画面、按钮高亮颜色、方向键移动高亮、确定、触摸选择、播放到第 3 章、AC-3 和 LPCM 解码、按语言偏好选音轨、手动换音轨、读盘统计。Android 部分（JNI、EGL、AAudio）容器里没有模拟器，只能真机验证。
+- **蓝光（N2.4 / N3 起）：** `dp_bd` 用 libbluray 的 `bd_open_stream`（同一个读盘回调）。光盘菜单模式下 `bd_play` + `bd_read_ext` 处理事件（标题、播放列表、播放项、章节、静止、弹出菜单可用、音轨 / 字幕切换、不连续点、加密错误），直接播放模式用 `bd_select_playlist` + `bd_read`。
+  菜单按钮（IG）和字幕（PG）让 libbluray 解码（`BLURAY_PLAYER_SETTING_DECODE_PG`），叠加层回调给的 RLE + 调色板（BT.709）转成 RGBA，按时间戳和画面合成；菜单坐标按图层尺寸（一般 1920×1080）换算。
+  M2TS 按 192 字节源包、按 PID 拼 PES，音频按流类型选解码器（TrueHD 里的 AC-3 核心跳过）。只有 BD-J 标题的盘自动直接播放主片。播完先把队列里的画面和声音放完再报告结束。
+  解码 / 显示 / 音画同步 / 播放统计和 DVD 共用 `dp_av`。电脑上的测试用 `make_bd.py` 生成测试蓝光（ffmpeg 编码 + 手写 index / MovieObject / MPLS / CLPI，带 EP map）：导航模式按语言选 AC-3、换到 LPCM、跳到标题 2、直接播放到结尾。HDMV 菜单和 PG 字幕生成不了测试盘，要用商业盘在真机上验证。
 
+### 7.16 阶段 3 解密组件说明（N3）
+
+- **宿主接口**（`native/diskplayer/src/dc_host.h`，App 和组件各有一份）：组件导出 `dvdcss_set_host` / `aacs_set_host` 接收 `{版本, scsi(), log()}`。
+  `scsi()` 经 JNI 回到 Kotlin 的 `DriveSectorReader.scsi` → 光驱会话 → 只读守卫 → 命令日志（`sensitive`：载荷不写进日志，CDB、结果、原始 sense 照写）→ BOT。
+  守卫放行的认证格式见 2.5（对照 T10 KEY CLASS 表、libdvdcss / libaacs / Linux / Windows / ReactOS），SEND KEY 06h（改地区码）永久拦截。
+- **CSS**：libdvdread 的一行补丁让它按环境变量 `DISKANDROID_DVDCSS` 的绝对路径加载组件；libdvdcss 的补丁让流模式也走认证（每个 `ioctl_*` 先看有没有宿主）。
+  标题密钥缓存在 `cache/dvdcss`。认证失败时按光驱的 sense 说明原因（6F/04 地区不符、6F/05 没设地区……）。
+- **AACS**：libaacs 的补丁把 `mmc_device_linux.c` 换成经宿主发命令（没有宿主就完全不碰光驱），`mmc_open` 不再要求设备路径；日志转给 App，16 个以上连续十六进制字符换成 `<...>`（只保留盘 ID）；版本脚本只导出 `aacs_*`。
+  组件保存为 `files/plugins/aacs/libaacs-<哈希>.so.0`，`LIBAACS_PATH` 设为去掉 `.so.0` 的路径（libbluray 自己加后缀），`XDG_CONFIG_HOME` = `files/aacs-config`，
+  `XDG_CACHE_HOME` = `cache/aacs-cache`，`XDG_CONFIG_DIRS` 指向一个不存在的目录（否则同一个 KEYDB 会被解析两次）。
+  libaacs 的错误码由 libbluray 原样交给 `dp_bd`，转成 7 种中文说明；光驱那边的失败统一说"该光驱不支持此盘的认证"，界面附 sense。
+- **libgcrypt / libgpg-error**：GnuPG 官网的发布包，用 GnuPG 公布的签名公钥核对签名后记下 SHA-256 固定；只编 AES、SHA-1/2/3、BLAKE2（KDF 模块要）、ECC；arm64 的 AES 用 ARMv8 加密指令。组件 `libaacs.so` 约 0.9 MB。
+- **测试：**
+  - `plugins/decrypt/test/run_tests.sh`：模拟光驱。CSS：命令格式、顺序（AGID → Challenge → KEY1 → 作废）、从不发 SEND KEY 06h。AACS：KEYDB 里的 VUK 解密一个单元；媒体密钥 + 卷标识算出 VUK 并缓存在 `XDG_CACHE_HOME`；没有证书时只发 GET CONFIGURATION 和 REPORT KEY 38h、不发 SEND KEY；光驱不支持 AACS / 没有宿主的错误码；日志打码。
+  - `native/diskplayer/test/run_host_tests.sh` 的端到端部分：`make_bd.py --aacs` 生成 AACS 加密的测试蓝光（测试用密钥）和 KEYDB.cfg，libbluray 按 `LIBAACS_PATH` 加载组件、解密、解码出画面和声音；KEYDB 里没有这张盘时报"没有处理密钥（MKB 版本 77）"；`--uhd`（index.bdmv 0300）的加密盘报"不支持 AACS 2.0"；全程不向光驱发命令。
+  - 真正和光驱的 AACS 主机认证（需要 AACS LA 签名的光驱证书）在电脑上模拟不了，只能真机看日志。
