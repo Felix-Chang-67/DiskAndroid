@@ -17,8 +17,10 @@
 #include <time.h>
 
 #include "../src/dc_host.h"
+#include "../src/dp_bd.h"
 #include "../src/dp_core.h"
 #include "../src/dp_dvd.h"
+#include <libavcodec/avcodec.h>
 
 static JavaVM *g_vm;
 static jclass g_bridge_class;     /* io.github.felixchang67.diskandroid.core.player.NativeBridge */
@@ -75,7 +77,9 @@ typedef struct {
     jmethodID event_mid;
 
     dp_source *src;
+    int kind;                /* 0 = DVD，1 = 蓝光 */
     dp_dvd *dvd;
+    dp_bd *bd;
 
     /* 视频（只在视频线程里碰 EGL / GL） */
     pthread_mutex_t win_lock;
@@ -654,13 +658,11 @@ static void audio_close(void *opaque) {
 
 #define JFN(name) Java_io_github_felixchang67_diskandroid_core_player_NativeBridge_##name
 
-JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject reader, jlong size, jobject listener, jint region_mask,
-                                           jstring menu_lang, jstring audio_lang, jstring spu_lang, jint start_title, jboolean deinterlace,
-                                           jint prefetch, jobjectArray err_out) {
-    (void)cls;
+/* 两种播放器共用：建 jplayer（Java 对象引用、读盘源、平台回调）。 */
+static jplayer *player_new(JNIEnv *env, jobject reader, jlong size, jobject listener, jint prefetch, dp_platform *pf) {
     dp_log_set(log_to_java, NULL);
     jplayer *p = calloc(1, sizeof(*p));
-    if (!p) return 0;
+    if (!p) return NULL;
     pthread_mutex_init(&p->win_lock, NULL);
     pthread_cond_init(&p->win_cond, NULL);
     pthread_mutex_init(&p->aa_lock, NULL);
@@ -674,16 +676,43 @@ JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject read
     jclass lc = (*env)->GetObjectClass(env, listener);
     p->event_mid = (*env)->GetMethodID(env, lc, "onEvent", "(IIILjava/lang/String;)V");
     p->src = dp_source_new(read_cb, p, (uint64_t)size, prefetch);
-    /* 解密组件认证时用这台光驱（打开 DVD 时 libdvdcss 就会认证） */
+    /* 解密组件认证时用这台光驱（打开盘时 libdvdcss / libaacs 就会认证） */
     access_set(env, reader);
-
-    dp_platform pf = {
+    dp_platform tmp = {
         .opaque = p, .video_present = video_present, .video_idle = video_idle, .video_exit = video_exit,
         .audio_open = audio_open, .audio_write = audio_write,
         .audio_played = audio_played, .audio_xruns = audio_xruns, .audio_pause = audio_pause, .audio_flush = audio_flush,
         .audio_close = audio_close,
         .on_event = event_cb, .realtime = true,
     };
+    *pf = tmp;
+    return p;
+}
+
+/* 打开失败：释放 player_new 建的东西。 */
+static void player_free_failed(JNIEnv *env, jplayer *p, jobject reader, const char *err, jobjectArray err_out) {
+    if (err_out && (*env)->GetArrayLength(env, err_out) > 0) {
+        jstring e = (*env)->NewStringUTF(env, err);
+        (*env)->SetObjectArrayElement(env, err_out, 0, e);
+    }
+    access_clear(env, reader);
+    dp_source_free(p->src);
+    (*env)->DeleteGlobalRef(env, p->reader);
+    (*env)->DeleteGlobalRef(env, p->listener);
+    pthread_mutex_destroy(&p->win_lock);
+    pthread_cond_destroy(&p->win_cond);
+    pthread_mutex_destroy(&p->aa_lock);
+    free(p);
+}
+
+JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject reader, jlong size, jobject listener, jint region_mask,
+                                           jstring menu_lang, jstring audio_lang, jstring spu_lang, jint start_title, jboolean deinterlace,
+                                           jint prefetch, jobjectArray err_out) {
+    (void)cls;
+    dp_platform pf;
+    jplayer *p = player_new(env, reader, size, listener, prefetch, &pf);
+    if (!p) return 0;
+    p->kind = 0;
     dp_dvd_options opt;
     memset(&opt, 0, sizeof(opt));
     opt.region_mask = region_mask;
@@ -703,18 +732,40 @@ JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject read
     char err[256] = "";
     p->dvd = dp_dvd_open(p->src, &pf, &opt, err, sizeof(err));
     if (!p->dvd) {
-        if (err_out && (*env)->GetArrayLength(env, err_out) > 0) {
-            jstring e = (*env)->NewStringUTF(env, err);
-            (*env)->SetObjectArrayElement(env, err_out, 0, e);
-        }
-        access_clear(env, reader);
-        dp_source_free(p->src);
-        (*env)->DeleteGlobalRef(env, p->reader);
-        (*env)->DeleteGlobalRef(env, p->listener);
-        pthread_mutex_destroy(&p->win_lock);
-        pthread_cond_destroy(&p->win_cond);
-        pthread_mutex_destroy(&p->aa_lock);
-        free(p);
+        player_free_failed(env, p, reader, err, err_out);
+        return 0;
+    }
+    return (jlong)(intptr_t)p;
+}
+
+static void copy_lang(JNIEnv *env, jstring js, char *dst, int n) {
+    const char *s = (*env)->GetStringUTFChars(env, js, NULL);
+    strncpy(dst, s, (size_t)n);
+    dst[n] = 0;
+    (*env)->ReleaseStringUTFChars(env, js, s);
+}
+
+/* 蓝光：[startPlaylist] < 0 用光盘菜单（导航模式），>= 0 直接播放这个播放列表。 */
+JNIEXPORT jlong JNICALL JFN(nativeOpenBluray)(JNIEnv *env, jclass cls, jobject reader, jlong size, jobject listener, jstring audio_lang,
+                                              jstring pg_lang, jstring menu_lang, jint region, jint start_playlist, jboolean deinterlace,
+                                              jint prefetch, jobjectArray err_out) {
+    (void)cls;
+    dp_platform pf;
+    jplayer *p = player_new(env, reader, size, listener, prefetch, &pf);
+    if (!p) return 0;
+    p->kind = 1;
+    dp_bd_options opt;
+    memset(&opt, 0, sizeof(opt));
+    copy_lang(env, audio_lang, opt.audio_lang, 3);
+    copy_lang(env, pg_lang, opt.pg_lang, 3);
+    copy_lang(env, menu_lang, opt.menu_lang, 3);
+    opt.region = region;
+    opt.start_playlist = start_playlist;
+    opt.deinterlace = deinterlace;
+    char err[256] = "";
+    p->bd = dp_bd_open(p->src, &pf, &opt, err, sizeof(err));
+    if (!p->bd) {
+        player_free_failed(env, p, reader, err, err_out);
         return 0;
     }
     return (jlong)(intptr_t)p;
@@ -724,14 +775,18 @@ JNIEXPORT void JNICALL JFN(nativeStart)(JNIEnv *env, jclass cls, jlong h) {
     (void)env;
     (void)cls;
     jplayer *p = (jplayer *)(intptr_t)h;
-    if (p) dp_dvd_start(p->dvd);
+    if (p) {
+        if (p->kind == 1) dp_bd_start(p->bd); else dp_dvd_start(p->dvd);
+    }
 }
 
 JNIEXPORT void JNICALL JFN(nativeCommand)(JNIEnv *env, jclass cls, jlong h, jint cmd, jint a1, jint a2) {
     (void)env;
     (void)cls;
     jplayer *p = (jplayer *)(intptr_t)h;
-    if (p) dp_dvd_command(p->dvd, cmd, a1, a2);
+    if (p) {
+        if (p->kind == 1) dp_bd_command(p->bd, cmd, a1, a2); else dp_dvd_command(p->dvd, cmd, a1, a2);
+    }
 }
 
 JNIEXPORT void JNICALL JFN(nativeSetSurface)(JNIEnv *env, jclass cls, jlong h, jobject surface) {
@@ -760,41 +815,76 @@ JNIEXPORT void JNICALL JFN(nativeSetSurface)(JNIEnv *env, jclass cls, jlong h, j
         }
     }
     pthread_mutex_unlock(&p->win_lock);
-    dp_dvd_refresh(p->dvd);
+    if (p->kind == 1) dp_bd_refresh(p->bd); else dp_dvd_refresh(p->dvd);
 }
 
 /*
- * 状态：ints 依次是 域、标题、章节、标题数、章节数、按钮数、当前按钮、静止、暂停、结束、
- * 音轨数、当前音轨、字幕数、当前字幕、字幕显示、角度数、当前角度、视频宽、视频高、16:9、显示宽、显示高、帧宽、帧高、音频流号；
- * longs 依次是 位置 ms、时长 ms、读盘字节、读错扇区、显示帧数、丢帧数、音频帧数；
- * strings：音轨说明（最多 8）+ 字幕说明（最多 32）。
+ * 状态（DVD 和蓝光共用一种排列，见 core:player 的 DiscPlayer.parseState）：
+ * ints[0..24]：域、标题、章节、标题数、章节数、按钮数、当前按钮、静止、暂停、结束、
+ *   音轨数、当前音轨、字幕数、当前字幕、字幕显示、角度数、当前角度、视频宽、视频高、16:9、显示宽、显示高、帧宽、帧高、音频流号；
+ * ints[25..32]：种类（0 DVD / 1 蓝光）、蓝光模式、蓝光菜单显示中、有弹出菜单、播放列表号、BD-J、图层宽、图层高；
+ * longs：位置 ms、时长 ms、读盘字节、读错扇区、显示帧数、丢帧数、音频帧数；
+ * strings：音轨说明 + 字幕说明 + 视频编码名 + 音频编码名 + 错误。
  */
+#define STATE_INTS 33
+static jobjectArray make_strings(JNIEnv *env, int na, char (*audio)[24], int ns, char (*subs)[8], int vcodec, int acodec, const char *error) {
+    jclass sc = (*env)->FindClass(env, "java/lang/String");
+    jobjectArray arr = (*env)->NewObjectArray(env, na + ns + 3, sc, NULL);
+    for (int i = 0; i < na; i++) {
+        jstring t = (*env)->NewStringUTF(env, audio[i]);
+        (*env)->SetObjectArrayElement(env, arr, i, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    for (int i = 0; i < ns; i++) {
+        jstring t = (*env)->NewStringUTF(env, subs[i]);
+        (*env)->SetObjectArrayElement(env, arr, na + i, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    const char *extra[3] = {vcodec ? avcodec_get_name((enum AVCodecID)vcodec) : "", acodec ? avcodec_get_name((enum AVCodecID)acodec) : "",
+                            error ? error : ""};
+    for (int i = 0; i < 3; i++) {
+        jstring t = (*env)->NewStringUTF(env, extra[i]);
+        (*env)->SetObjectArrayElement(env, arr, na + ns + i, t);
+        (*env)->DeleteLocalRef(env, t);
+    }
+    return arr;
+}
+
 JNIEXPORT jobjectArray JNICALL JFN(nativeGetState)(JNIEnv *env, jclass cls, jlong h, jintArray ints, jlongArray longs) {
     (void)cls;
     jplayer *p = (jplayer *)(intptr_t)h;
     if (!p) return NULL;
+    jint iv[STATE_INTS];
+    memset(iv, 0, sizeof(iv));
+    jlong lv[7];
+    if (p->kind == 1) {
+        static dp_bd_state s; /* 很大（字符串表），不放栈上；只在这里用，nativeGetState 由 Kotlin 串行调用 */
+        dp_bd_get_state(p->bd, &s);
+        int domain = s.menu ? 2 : (s.mode == DP_BD_MODE_STOP ? 0 : 4);
+        jint a[STATE_INTS] = {domain, s.title == 0xFFFF ? 0 : s.title, s.chapter, s.titles, s.chapters, s.menu ? 1 : 0, 0, s.still, s.paused,
+                              s.ended, s.audio_count, s.audio_current, s.pg_count, s.pg_current, s.pg_shown, s.angles, s.angle,
+                              s.video_w, s.video_h, s.video_h > 0 && s.video_w * 10 / s.video_h >= 15, p->disp_w, p->disp_h, p->frame_w,
+                              p->frame_h, s.audio_codec_id, 1, s.mode, s.menu, s.popup, s.playlist, s.bdj, s.plane_w, s.plane_h};
+        memcpy(iv, a, sizeof(a));
+        jlong l[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
+                      (jlong)s.audio_frames};
+        memcpy(lv, l, sizeof(l));
+        (*env)->SetIntArrayRegion(env, ints, 0, STATE_INTS, iv);
+        (*env)->SetLongArrayRegion(env, longs, 0, 7, lv);
+        return make_strings(env, s.audio_count, s.audio_desc, s.pg_count, s.pg_desc, s.video_codec_id, s.audio_codec_id, s.error);
+    }
     dp_dvd_state s;
     dp_dvd_get_state(p->dvd, &s);
-    jint iv[25] = {s.domain, s.title, s.chapter, s.titles, s.chapters, s.buttons, s.button, s.still, s.paused, s.ended,
-                   s.audio_count, s.audio_current, s.spu_count, s.spu_current, s.spu_shown, s.angles, s.angle,
-                   s.video_w, s.video_h, s.wide, p->disp_w, p->disp_h, p->frame_w, p->frame_h, s.audio_code};
-    (*env)->SetIntArrayRegion(env, ints, 0, 25, iv);
-    jlong lv[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
-                   (jlong)s.audio_frames};
+    jint a[25] = {s.domain, s.title, s.chapter, s.titles, s.chapters, s.buttons, s.button, s.still, s.paused, s.ended,
+                  s.audio_count, s.audio_current, s.spu_count, s.spu_current, s.spu_shown, s.angles, s.angle,
+                  s.video_w, s.video_h, s.wide, p->disp_w, p->disp_h, p->frame_w, p->frame_h, s.audio_code};
+    memcpy(iv, a, sizeof(a));
+    jlong l[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
+                  (jlong)s.audio_frames};
+    memcpy(lv, l, sizeof(l));
+    (*env)->SetIntArrayRegion(env, ints, 0, STATE_INTS, iv);
     (*env)->SetLongArrayRegion(env, longs, 0, 7, lv);
-    jclass sc = (*env)->FindClass(env, "java/lang/String");
-    jobjectArray arr = (*env)->NewObjectArray(env, s.audio_count + s.spu_count, sc, NULL);
-    for (int i = 0; i < s.audio_count; i++) {
-        jstring t = (*env)->NewStringUTF(env, s.audio_desc[i]);
-        (*env)->SetObjectArrayElement(env, arr, i, t);
-        (*env)->DeleteLocalRef(env, t);
-    }
-    for (int i = 0; i < s.spu_count; i++) {
-        jstring t = (*env)->NewStringUTF(env, s.spu_desc[i]);
-        (*env)->SetObjectArrayElement(env, arr, s.audio_count + i, t);
-        (*env)->DeleteLocalRef(env, t);
-    }
-    return arr;
+    return make_strings(env, s.audio_count, s.audio_desc, s.spu_count, s.spu_desc, s.video_codec_id, s.audio_codec_id, NULL);
 }
 
 JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
@@ -802,7 +892,7 @@ JNIEXPORT void JNICALL JFN(nativeClose)(JNIEnv *env, jclass cls, jlong h) {
     jplayer *p = (jplayer *)(intptr_t)h;
     if (!p) return;
     /* 先停线程：视频线程退出前自己拆 EGL（video_exit），音频线程自己关 AAudio */
-    dp_dvd_close(p->dvd);
+    if (p->kind == 1) dp_bd_close(p->bd); else dp_dvd_close(p->dvd);
     pthread_mutex_lock(&p->win_lock);
     if (p->window) ANativeWindow_release(p->window);
     if (p->cur_window) ANativeWindow_release(p->cur_window);
@@ -891,5 +981,5 @@ JNIEXPORT void JNICALL JFN(nativeDetachCss)(JNIEnv *env, jclass cls) {
 
 JNIEXPORT jstring JNICALL JFN(nativeVersion)(JNIEnv *env, jclass cls) {
     (void)cls;
-    return (*env)->NewStringUTF(env, "diskplayer/1 (libdvdnav 7.0.0, libdvdread 7.1.1, FFmpeg 9.0.2)");
+    return (*env)->NewStringUTF(env, "diskplayer/2 (libdvdnav 7.0.0, libdvdread 7.1.1, libbluray 1.5.0, FFmpeg 9.0.2)");
 }

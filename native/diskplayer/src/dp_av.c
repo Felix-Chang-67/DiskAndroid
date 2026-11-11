@@ -192,6 +192,9 @@ static bool v_open_codec(dp_av *d, vstate *v, int codec_id) {
     }
     v->parser = av_parser_init((enum AVCodecID)codec_id);
     v->codec_id = codec_id;
+    pthread_mutex_lock(&d->st_lock);
+    d->st.video_codec = codec_id;
+    pthread_mutex_unlock(&d->st_lock);
     dp_log(DP_LOG_INFO, d->tag, "视频解码器：%s（%d 线程）", c->name, v->ctx->thread_count);
     return true;
 }
@@ -610,6 +613,9 @@ static bool a_open(dp_av *d, astate *a, int stream, int codec_id) {
     if (a_needs_parser(codec_id)) a->parser = av_parser_init((enum AVCodecID)codec_id);
     a->stream = stream;
     a->codec_id = codec_id;
+    pthread_mutex_lock(&d->st_lock);
+    d->st.audio_codec = codec_id;
+    pthread_mutex_unlock(&d->st_lock);
     dp_log(DP_LOG_INFO, d->tag, "音频解码器：%s（流 %Xh）", c->name, stream);
     return true;
 }

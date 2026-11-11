@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runTest
 import java.util.zip.GZIPInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -140,6 +141,15 @@ class VideoDiscTest {
         assertEquals("英语", Languages.name("eng"))
         assertEquals("中文", Languages.name("zho"))
         assertEquals("未知语言", Languages.name(null))
+        // DVD 的两个字母和蓝光的三个字母能互相比较（字幕 / 音轨偏好）
+        assertEquals("zh", Languages.normalize("CHI"))
+        assertEquals("ja", Languages.normalize("jpn"))
+        assertEquals(null, Languages.normalize("---"))
+        assertTrue(Languages.same("zh", "chi"))
+        assertTrue(Languages.same("zho", "zh"))
+        assertTrue(Languages.same("ja", "jpn"))
+        assertFalse(Languages.same("ja", "eng"))
+        assertFalse(Languages.same("---", "---"))
         assertEquals("1:35:00", formatDuration(95 * 60_000L))
         assertEquals("0:30", formatDuration(30_000L))
     }

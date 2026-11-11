@@ -71,6 +71,20 @@ object NativeBridge {
         errOut: Array<String?>,
     ): Long
 
+    @JvmStatic external fun nativeOpenBluray(
+        reader: SectorReader,
+        size: Long,
+        listener: PlayerListener,
+        audioLang: String,
+        pgLang: String,
+        menuLang: String,
+        region: Int,
+        startPlaylist: Int,
+        deinterlace: Boolean,
+        prefetch: Int,
+        errOut: Array<String?>,
+    ): Long
+
     @JvmStatic external fun nativeStart(handle: Long)
     @JvmStatic external fun nativeCommand(handle: Long, cmd: Int, a1: Int, a2: Int)
     @JvmStatic external fun nativeSetSurface(handle: Long, surface: Surface?)

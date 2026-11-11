@@ -16,13 +16,15 @@ import io.github.felixchang67.diskandroid.core.drive.DriveSession
 import io.github.felixchang67.diskandroid.core.drive.DriveState
 import io.github.felixchang67.diskandroid.core.drive.MediaStatus
 import io.github.felixchang67.diskandroid.core.fs.ContentKind
+import io.github.felixchang67.diskandroid.core.fs.DiscContent
 import io.github.felixchang67.diskandroid.core.fs.SECTOR_SIZE
 import io.github.felixchang67.diskandroid.core.log.DiskLog
 import io.github.felixchang67.diskandroid.core.log.LogLevel
 import io.github.felixchang67.diskandroid.core.mmc.MmcNames
-import io.github.felixchang67.diskandroid.core.player.DvdPlayer
+import io.github.felixchang67.diskandroid.core.player.DiscPlayer
 import io.github.felixchang67.diskandroid.core.player.NativeBridge
 import io.github.felixchang67.diskandroid.core.player.PlayerListener
+import io.github.felixchang67.diskandroid.core.video.Languages
 import io.github.felixchang67.diskandroid.core.video.formatDuration
 import io.github.felixchang67.diskandroid.files.DiscBrowser
 import io.github.felixchang67.diskandroid.player.CdPlaybackController
@@ -69,7 +71,7 @@ class VideoPlaybackController(
         val error: String? = null,
         /** 开始播放时的提示（地区不匹配之类），几秒后自动消失。 */
         val notice: String? = null,
-        val state: DvdPlayer.State? = null,
+        val state: DiscPlayer.State? = null,
         /** 标题号 → 说明（"1:52:10 · 12 章"），来自 IFO 分析，界面的标题列表用。 */
         val titleInfo: Map<Int, String> = emptyMap(),
     )
@@ -92,14 +94,18 @@ class VideoPlaybackController(
         val openedAtMs: Long,
         /** CSS 加密盘（经 DVD 解密组件认证）。 */
         val css: Boolean,
+        val kind: DiscPlayer.Kind = DiscPlayer.Kind.DVD,
+        /** AACS 加密的蓝光（经蓝光解密组件认证）。 */
+        val aacs: Boolean = false,
     ) {
         @Volatile
-        var player: DvdPlayer? = null
+        var player: DiscPlayer? = null
         var firstFrameLogged = false
         var subtitleChoiceTitle = -1
         var userTouchedSubtitles = false
         var lastLoggedTitle = -1
-        var lastLoggedDomain: DvdPlayer.Domain? = null
+        var lastLoggedPlaylist = -2
+        var lastLoggedDomain: DiscPlayer.Domain? = null
     }
 
     private val prefs = app.getSharedPreferences("video", Context.MODE_PRIVATE)
@@ -158,7 +164,7 @@ class VideoPlaybackController(
                 if (tag == "DVD" || tag == "VIDEO") TAG else "$TAG/$tag", msg,
             )
         }
-        log.i(TAG, "视频播放器原生库：" + (DvdPlayer.version() ?: "加载失败（${NativeBridge.loadErrorText}）"))
+        log.i(TAG, "视频播放器原生库：" + (DiscPlayer.version() ?: "加载失败（${NativeBridge.loadErrorText}）"))
     }
 
     val playing: Boolean get() = current != null
@@ -171,14 +177,40 @@ class VideoPlaybackController(
     /** 原生播放库不能用的原因（null = 能用）。测试里替换掉（电脑上没有 Android 的 .so）。 */
     var nativeProblem: () -> String? = { if (NativeBridge.isAvailable) null else "播放器原生库加载失败：${NativeBridge.loadErrorText}" }
 
+    /** 盘上的视频格式：DVD-Video、蓝光（BDMV / AVCHD），没有视频为 null。 */
+    fun videoKind(content: DiscContent?): DiscPlayer.Kind? = when {
+        content == null -> null
+        ContentKind.DVD_VIDEO in content.kinds -> DiscPlayer.Kind.DVD
+        ContentKind.BDMV in content.kinds || ContentKind.AVCHD in content.kinds -> DiscPlayer.Kind.BLURAY
+        else -> null
+    }
+
     /** 不能播放这张盘的原因（null = 可以）。 */
-    fun refusal(disc: DiscInfo, content: Set<ContentKind>?): String? = when {
-        disc.dvdCopyright?.isCss == true && decrypt.file(DecryptComponents.Kind.CSS) == null -> PROTECTED_MESSAGE
-        disc.dvdCopyright?.protectionType == 0x02 -> "这张盘有 CPRM 保护（数字电视录像），暂不支持播放"
-        content != null && ContentKind.DVD_VIDEO !in content && (ContentKind.BDMV in content || ContentKind.AVCHD in content) ->
-            "蓝光（BDMV）播放在下一个测试节点（N2.4）加入"
-        content != null && ContentKind.DVD_VIDEO !in content -> "这张盘上没有 DVD-Video（VIDEO_TS）"
-        else -> nativeProblem()
+    fun refusal(disc: DiscInfo, content: DiscContent?): String? {
+        val kind = videoKind(content)
+        return when {
+            disc.dvdCopyright?.isCss == true && decrypt.file(DecryptComponents.Kind.CSS) == null -> PROTECTED_MESSAGE
+            disc.dvdCopyright?.protectionType == 0x02 -> "这张盘有 CPRM 保护（数字电视录像），暂不支持播放"
+            content != null && kind == null -> "这张盘上没有视频（VIDEO_TS / BDMV）"
+            kind == DiscPlayer.Kind.BLURAY && content?.aacs == true -> aacsMissing()
+            else -> null
+        } ?: nativeProblem()
+    }
+
+    /** AACS 盘需要的组件缺了哪个（null = 都有）。 */
+    private fun aacsMissing(): String? = when {
+        decrypt.file(DecryptComponents.Kind.AACS) == null -> "$PROTECTED_MESSAGE（AACS：要导入蓝光解密组件和 KEYDB.cfg）"
+        decrypt.file(DecryptComponents.Kind.KEYDB) == null -> "$PROTECTED_MESSAGE（AACS：还要导入 KEYDB.cfg 密钥库）"
+        else -> null
+    }
+
+    /** 看盘上的内容决定 DVD 还是蓝光；[target] 对 DVD 是标题号（0 = 光盘菜单），对蓝光是播放列表号（-1 = 光盘菜单）。 */
+    fun playDisc(session: DriveSession, disc: DiscInfo, menu: Boolean, target: Int, label: String?, why: String): String? {
+        val content = files.states.value[session]?.info?.content
+        return when (videoKind(content)) {
+            DiscPlayer.Kind.BLURAY -> playBluray(session, disc, if (menu) -1 else target, label, why)
+            else -> play(session, disc, if (menu) 0 else target, label, why)
+        }
     }
 
     // ---------------- 播放 ----------------
@@ -189,7 +221,7 @@ class VideoPlaybackController(
      */
     fun play(session: DriveSession, disc: DiscInfo, startTitle: Int, label: String?, why: String): String? {
         cancelAutoplay(log = false)
-        val content = files.states.value[session]?.info?.content?.kinds?.toSet()
+        val content = files.states.value[session]?.info?.content
         refusal(disc, content)?.let {
             log.i(TAG, "不播放：$it")
             return it
@@ -209,7 +241,7 @@ class VideoPlaybackController(
         stop("开始新的播放")
         beforePlay()
         val region = DvdRegion.decide(session.info.value?.rpc, disc.dvdCopyright)
-        val options = DvdPlayer.Options(
+        val options = DiscPlayer.Options(
             regionMask = region.playerMask,
             menuLanguage = prefs.getString("menuLang", null) ?: "zh",
             audioLanguage = prefs.getString("audioLang", null) ?: "ja",
@@ -225,19 +257,70 @@ class VideoPlaybackController(
         log.i(
             TAG, "播放 DVD：${if (startTitle > 0) "直接播放标题 $startTitle" else "从光盘菜单开始"}（$why）",
             "盘" to title, "地区" to region.explanation, "语言" to "菜单 ${options.menuLanguage}，音轨 ${options.audioLanguage}，字幕 ${options.subtitleLanguage}",
-            "原生库" to DvdPlayer.version(), "加密" to if (css) "CSS（用 DVD 解密组件认证）" else "无",
+            "原生库" to DiscPlayer.version(), "加密" to if (css) "CSS（用 DVD 解密组件认证）" else "无",
         )
         region.warning?.let { log.w(TAG, it) }
         val titleInfo = files.states.value[session]?.video?.info?.titles.orEmpty()
             .mapNotNull { t -> t.dvd?.let { d -> d.number to "${formatDuration(t.durationMs)} · ${t.chapters} 章" + if (t.angles > 1) " · ${t.angles} 个角度" else "" } }
             .toMap()
-        _screen.value = Screen(title, opening = true, notice = region.warning, titleInfo = titleInfo)
+        launch(c, title, region.warning, titleInfo) { DiscPlayer.open(c.reader, sectors * SECTOR_SIZE, listener(c), options) }
+        return null
+    }
+
+    /**
+     * 播放 [session] 里的蓝光：[startPlaylist] < 0 用光盘菜单（First Play、顶层菜单），>= 0 直接播放这个播放列表。
+     * BD-J 菜单的盘会自动改成直接播放主片。返回给用户看的错误（null = 已开始）。
+     */
+    fun playBluray(session: DriveSession, disc: DiscInfo, startPlaylist: Int, label: String?, why: String): String? {
+        cancelAutoplay(log = false)
+        val content = files.states.value[session]?.info?.content
+        refusal(disc, content)?.let {
+            log.i(TAG, "不播放：$it")
+            return it
+        }
+        busyReason()?.let { return it }
+        val sectors = disc.capacity?.blocks ?: return "读不到盘片容量"
+        val aacs = content?.aacs == true
+        if (aacs) attachAacs()?.let { return it }
+        stop("开始新的播放")
+        beforePlay()
+        val options = DiscPlayer.BlurayOptions(
+            audioLanguage = prefs.getString("bdAudioLang", null) ?: "jpn",
+            subtitleLanguage = prefs.getString("bdSubLang", null) ?: "chi",
+            menuLanguage = prefs.getString("bdMenuLang", null) ?: "jpn",
+            region = prefs.getInt("bdRegion", 1),
+            startPlaylist = startPlaylist,
+        )
+        val title = label?.takeIf { it.isNotBlank() } ?: "蓝光"
+        val c = Current(
+            session, disc, CdPlaybackController.fingerprint(disc), title, startPlaylist, DriveSectorReader(session, sectors, log),
+            System.currentTimeMillis(), css = false, kind = DiscPlayer.Kind.BLURAY, aacs = aacs,
+        )
+        current = c
+        log.i(
+            TAG, "播放蓝光：${if (startPlaylist >= 0) "直接播放 %05d.mpls".format(startPlaylist) else "从光盘菜单开始"}（$why）",
+            "盘" to title, "语言" to "音轨 ${options.audioLanguage}，字幕 ${options.subtitleLanguage}，菜单 ${options.menuLanguage}",
+            "地区" to when (options.region) { 1 -> "A"; 2 -> "B"; 4 -> "C"; else -> options.region.toString() },
+            "原生库" to DiscPlayer.version(), "加密" to if (aacs) "AACS（用蓝光解密组件认证）" else "无",
+        )
+        // 播放列表号 → 说明（直接播放模式下的"标题"列表）
+        val titleInfo = files.states.value[session]?.video?.info?.titles.orEmpty()
+            .mapNotNull { t -> t.bd?.let { b -> (b.name.take(5).toIntOrNull() ?: return@let null) to "${b.name} · ${formatDuration(t.durationMs)} · ${t.chapters} 章" } }
+            .toMap()
+        launch(c, title, null, titleInfo) { DiscPlayer.openBluray(c.reader, sectors * SECTOR_SIZE, listener(c), options) }
+        return null
+    }
+
+    /** 启用蓝光解密组件（libaacs）。返回给用户看的错误，null = 成功。阶段 3 的 AACS 部分实现。 */
+    private fun attachAacs(): String? = aacsMissing()
+
+    /** 打开播放器（IO 线程）、接上画面、开始播放。 */
+    private fun launch(c: Current, title: String, notice: String?, titleInfo: Map<Int, String>, open: () -> DiscPlayer) {
+        _screen.value = Screen(title, opening = true, notice = notice, titleInfo = titleInfo)
         watch(c)
         openActivity()
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching { DvdPlayer.open(c.reader, sectors * SECTOR_SIZE, listener(c), options) }
-            }
+            val result = withContext(Dispatchers.IO) { runCatching { open() } }
             val player = result.getOrNull()
             if (current !== c) {
                 if (player != null) withContext(closer) { player.close() }
@@ -245,7 +328,7 @@ class VideoPlaybackController(
             }
             if (player == null) {
                 val msg = result.exceptionOrNull()?.message ?: "打不开"
-                log.w(TAG, "打开 DVD 失败：$msg")
+                log.w(TAG, "打开失败：$msg")
                 fail(c, if (c.reader.protectedHit) protectedReason(c) else c.reader.fatalReason ?: msg)
                 return@launch
             }
@@ -256,12 +339,11 @@ class VideoPlaybackController(
             registerNoisy(true)
             _screen.update { it?.copy(opening = false) }
             startPolling(c)
-            if (region.warning != null) {
+            if (notice != null) {
                 delay(8_000)
                 _screen.update { s -> if (current === c) s?.copy(notice = null) else s }
             }
         }
-        return null
     }
 
     private fun openActivity() {
@@ -278,15 +360,15 @@ class VideoPlaybackController(
     private fun onEvent(c: Current, event: Int, a1: Int, a2: Int, text: String?) {
         if (current !== c) return
         when (event) {
-            DvdPlayer.EV_FIRST_FRAME -> if (!c.firstFrameLogged) {
+            DiscPlayer.EV_FIRST_FRAME -> if (!c.firstFrameLogged) {
                 c.firstFrameLogged = true
                 log.i(TAG, "第一帧画面：${a1}×$a2，打开后 ${System.currentTimeMillis() - c.openedAtMs} ms")
             }
-            DvdPlayer.EV_END -> {
+            DiscPlayer.EV_END -> {
                 log.i(TAG, "光盘播放结束（${c.reader.summary()}）")
                 poll(c)
             }
-            DvdPlayer.EV_ERROR -> {
+            DiscPlayer.EV_ERROR -> {
                 val reason = when {
                     c.reader.protectedHit -> protectedReason(c)
                     c.reader.fatalReason != null -> "读盘出错：${c.reader.fatalReason}"
@@ -347,24 +429,45 @@ class VideoPlaybackController(
     }
 
     /** 状态变化时：记日志、按偏好自动打开字幕。 */
-    private fun onState(c: Current, s: DvdPlayer.State) {
-        if (s.domain != c.lastLoggedDomain || (s.domain == DvdPlayer.Domain.TITLE && s.title != c.lastLoggedTitle)) {
+    private fun onState(c: Current, s: DiscPlayer.State) {
+        val changed = s.domain != c.lastLoggedDomain || (s.domain == DiscPlayer.Domain.TITLE && s.title != c.lastLoggedTitle) ||
+            (s.isBluray && s.playlist != c.lastLoggedPlaylist)
+        if (changed) {
             c.lastLoggedDomain = s.domain
             c.lastLoggedTitle = s.title
+            c.lastLoggedPlaylist = s.playlist
+            val what = if (s.isBluray) {
+                val parts = mutableListOf(
+                    when {
+                        s.inMenu -> if (s.title == 0) "顶层菜单" else "光盘菜单"
+                        s.domain == DiscPlayer.Domain.STOP -> "停止"
+                        else -> "播放"
+                    },
+                )
+                if (s.bdMode == DiscPlayer.BD_MODE_MENU && s.title in 1..s.titles) parts += "标题 ${s.title}/${s.titles}"
+                if (s.playlist >= 0) parts += "%05d.mpls".format(s.playlist) + if (s.chapters > 0) "（${s.chapters} 章）" else ""
+                parts.joinToString("，")
+            } else {
+                s.domain.label + if (s.domain == DiscPlayer.Domain.TITLE) "，标题 ${s.title}/${s.titles}，${s.chapters} 章" else ""
+            }
             log.i(
-                TAG, "现在：${s.domain.label}" + if (s.domain == DvdPlayer.Domain.TITLE) "，标题 ${s.title}/${s.titles}，${s.chapters} 章" else "",
+                TAG, "现在：$what",
                 "音轨" to s.audio.getOrNull(s.audioCurrent), "字幕" to if (s.subtitleShown) s.subtitles.getOrNull(s.subtitleCurrent) else "关",
                 "画面" to "${s.videoWidth}×${s.videoHeight}${if (s.wide) " 16:9" else ""}",
+                "BD-J" to if (s.bdj) "光盘菜单是 BD-J（Java），做不了，直接播放主片" else null,
             )
         }
-        // 光盘没打开字幕、有偏好语言的字幕：自动打开（每个标题一次；用户自己选过就不再管）
-        val lang = prefs.getString("subLang", null) ?: "zh"
-        if (s.domain == DvdPlayer.Domain.TITLE && !c.userTouchedSubtitles && c.subtitleChoiceTitle != s.title && s.subtitles.isNotEmpty()) {
-            c.subtitleChoiceTitle = s.title
-            val idx = s.subtitles.indexOfFirst { it.equals(lang, ignoreCase = true) }
+        // 光盘没打开字幕、有偏好语言的字幕：自动打开（每个标题 / 播放列表一次；用户自己选过就不再管）
+        val lang = if (s.isBluray) prefs.getString("bdSubLang", null) ?: "chi" else prefs.getString("subLang", null) ?: "zh"
+        val key = if (s.isBluray) s.playlist else s.title
+        val feature = s.domain == DiscPlayer.Domain.TITLE && !s.inMenu &&
+            (!s.isBluray || (s.playlist >= 0 && (s.bdMode == DiscPlayer.BD_MODE_PLAYLIST || s.title > 0)))
+        if (feature && !c.userTouchedSubtitles && c.subtitleChoiceTitle != key && s.subtitles.isNotEmpty()) {
+            c.subtitleChoiceTitle = key
+            val idx = s.subtitles.indexOfFirst { Languages.same(it, lang) }
             if (!s.subtitleShown && idx >= 0) {
                 log.i(TAG, "按偏好打开字幕：第 ${idx + 1} 条（$lang）")
-                c.player?.command(DvdPlayer.CMD_SUBTITLE, idx)
+                c.player?.command(DiscPlayer.CMD_SUBTITLE, idx)
             }
         }
     }
@@ -393,7 +496,7 @@ class VideoPlaybackController(
 
     fun command(cmd: Int, a1: Int = 0, a2: Int = 0) {
         val c = current ?: return
-        if (cmd == DvdPlayer.CMD_SUBTITLE) c.userTouchedSubtitles = true
+        if (cmd == DiscPlayer.CMD_SUBTITLE) c.userTouchedSubtitles = true
         c.player?.command(cmd, a1, a2)
         poll(c)
     }
@@ -407,7 +510,7 @@ class VideoPlaybackController(
         val c = current ?: return
         val p = c.player ?: return
         if (_screen.value?.state?.paused == true) return
-        p.command(DvdPlayer.CMD_PAUSE)
+        p.command(DiscPlayer.CMD_PAUSE)
         poll(c)
     }
 
@@ -415,7 +518,7 @@ class VideoPlaybackController(
         val c = current ?: return
         val p = c.player ?: return
         requestFocus()
-        p.command(DvdPlayer.CMD_RESUME)
+        p.command(DiscPlayer.CMD_RESUME)
         poll(c)
     }
 
@@ -430,7 +533,7 @@ class VideoPlaybackController(
         val s = _screen.value?.state ?: return false
         val pt = toFrame(s, x, y, viewWidth, viewHeight) ?: return false
         if (!s.inMenu) return false
-        command(DvdPlayer.CMD_MOUSE_ACTIVATE, pt.first, pt.second)
+        command(DiscPlayer.CMD_MOUSE_ACTIVATE, pt.first, pt.second)
         return true
     }
 
@@ -439,10 +542,10 @@ class VideoPlaybackController(
         val s = _screen.value?.state ?: return
         if (!s.inMenu) return
         val pt = toFrame(s, x, y, viewWidth, viewHeight) ?: return
-        current?.player?.command(DvdPlayer.CMD_MOUSE_SELECT, pt.first, pt.second)
+        current?.player?.command(DiscPlayer.CMD_MOUSE_SELECT, pt.first, pt.second)
     }
 
-    private fun toFrame(s: DvdPlayer.State, x: Float, y: Float, viewWidth: Int, viewHeight: Int): Pair<Int, Int>? {
+    private fun toFrame(s: DiscPlayer.State, x: Float, y: Float, viewWidth: Int, viewHeight: Int): Pair<Int, Int>? {
         if (s.displayWidth <= 0 || s.displayHeight <= 0 || s.frameWidth <= 0 || s.frameHeight <= 0) return null
         val left = (viewWidth - s.displayWidth) / 2f
         val top = (viewHeight - s.displayHeight) / 2f
@@ -455,7 +558,8 @@ class VideoPlaybackController(
     /** 播放结束 / 出错后"从头再播"。 */
     fun restart() {
         val c = current ?: return
-        play(c.session, c.disc, c.startTitle, c.label, "重新播放")
+        if (c.kind == DiscPlayer.Kind.BLURAY) playBluray(c.session, c.disc, c.startTitle, c.label, "重新播放")
+        else play(c.session, c.disc, c.startTitle, c.label, "重新播放")
     }
 
     /** 停止播放、关闭播放界面。 */
@@ -486,7 +590,7 @@ class VideoPlaybackController(
                 "画面" to st?.let { "显示 ${it.framesShown} 帧，丢 ${it.framesDropped} 帧" },
                 "声音" to st?.let { "${it.audioFrames / 48_000} 秒" },
                 "补零扇区" to st?.readErrors,
-                "认证命令" to if (c.css) "${c.reader.authCommands.get()} 条（失败 ${c.reader.authFailures.get()}）" else null,
+                "认证命令" to if (c.css || c.aacs) "${c.reader.authCommands.get()} 条（失败 ${c.reader.authFailures.get()}）" else null,
             )
         }
     }
@@ -526,7 +630,9 @@ class VideoPlaybackController(
                                     is MediaStatus.Ready -> if (armed) {
                                         armed = false
                                         val disc = withTimeoutOrNull(15_000) { session.disc.first { it != null } }
-                                        if (disc != null && disc.family == MmcNames.DiscFamily.DVD) checkAutoplay(session, disc, uiVisible)
+                                        if (disc != null && (disc.family == MmcNames.DiscFamily.DVD || disc.family == MmcNames.DiscFamily.BD)) {
+                                            checkAutoplay(session, disc, uiVisible)
+                                        }
                                     }
                                     else -> Unit
                                 }
@@ -540,8 +646,8 @@ class VideoPlaybackController(
 
     private suspend fun checkAutoplay(session: DriveSession, disc: DiscInfo, uiVisible: StateFlow<Boolean>) {
         val info = files.volumeInfo(session, disc) ?: return
-        val kinds = info.content?.kinds?.toSet() ?: return
-        if (ContentKind.DVD_VIDEO !in kinds) return
+        val kind = videoKind(info.content) ?: return
+        val inserted = if (kind == DiscPlayer.Kind.BLURAY) "放入了蓝光" else "放入了 DVD 视频盘"
         val label = info.volume.label
         val why = when {
             !_autoplayEnabled.value -> "自动播放已关闭"
@@ -551,17 +657,17 @@ class VideoPlaybackController(
             else -> null
         }
         if (why != null) {
-            log.i(TAG, "放入了 DVD 视频盘，但不自动播放：$why")
+            log.i(TAG, "$inserted，但不自动播放：$why")
             return
         }
-        refusal(disc, kinds)?.let {
-            log.i(TAG, "放入了 DVD 视频盘，不能播放：$it")
+        refusal(disc, info.content)?.let {
+            log.i(TAG, "$inserted，不能播放：$it")
             _messages.tryEmit(it)
             return
         }
         val pending = AutoplayPending(session, disc, CdPlaybackController.fingerprint(disc), System.currentTimeMillis() + AUTOPLAY_DELAY_MS, label)
         _autoplay.value = pending
-        log.i(TAG, "放入了 DVD 视频盘：${AUTOPLAY_DELAY_MS / 1000} 秒后自动播放（${_autoStart.value.label}）")
+        log.i(TAG, "$inserted：${AUTOPLAY_DELAY_MS / 1000} 秒后自动播放（${_autoStart.value.label}）")
         autoplayJob?.cancel()
         autoplayJob = scope.launch {
             delay(AUTOPLAY_DELAY_MS)
@@ -585,12 +691,15 @@ class VideoPlaybackController(
         autoplayJob?.cancel()
         _autoplay.value = null
         if (p.session.disc.value?.let { CdPlaybackController.fingerprint(it) } != p.fingerprint) return
-        val title = if (_autoStart.value == AutoStart.MAIN) mainTitle(p.session) ?: 0 else 0
-        play(p.session, p.disc, title, p.label, "自动播放")?.let { _messages.tryEmit(it) }
+        val main = if (_autoStart.value == AutoStart.MAIN) mainTitle(p.session) else null
+        playDisc(p.session, p.disc, menu = main == null, target = main ?: 0, label = p.label, why = "自动播放")?.let { _messages.tryEmit(it) }
     }
 
-    /** 自动挑的主片的标题号（视频结构还没读出来时为 null）。 */
-    fun mainTitle(session: DriveSession): Int? = files.states.value[session]?.video?.info?.main?.dvd?.number
+    /** 自动挑的主片：DVD 的标题号 / 蓝光的播放列表号（视频结构还没读出来时为 null）。 */
+    fun mainTitle(session: DriveSession): Int? {
+        val main = files.states.value[session]?.video?.info?.main ?: return null
+        return main.dvd?.number ?: main.bd?.name?.take(5)?.toIntOrNull()
+    }
 
     // ---------------- 音频焦点 ----------------
 

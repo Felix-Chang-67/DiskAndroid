@@ -72,7 +72,7 @@ class VideoUiTest {
             val played = mutableListOf<Int>()
             compose.setContent {
                 Column {
-                    VideoSection(session, info, container.files, container.video) { played += it }
+                    VideoSection(session, info, container.files, container.video) { menu, t -> played += if (menu) 0 else t }
                     DiscFilesSection(session, info, container.files) {}
                 }
             }
@@ -85,7 +85,7 @@ class VideoUiTest {
             compose.onNodeWithText("▶ 直接播放主片（标题 1）").performClick()
             idle()
             assertEquals(listOf(0, 1), played)
-            compose.onNodeWithText("放入 DVD 视频盘后自动播放", substring = true).assertExists()
+            compose.onNodeWithText("放入视频盘（DVD / 蓝光）后自动播放", substring = true).assertExists()
             compose.onNodeWithText("音轨 1：日语 AC-3 单声道 48 kHz · 流 80h", substring = true).assertExists()
             compose.onNodeWithText("音轨 2：英语 MPEG-1 立体声 48 kHz · 流 C0h", substring = true).assertExists()
             // 测试盘的标题都不到 10 秒（真盘上是片头警告、菜单背景）：默认折叠
@@ -143,7 +143,7 @@ class VideoUiTest {
             val played = mutableListOf<Int>()
             compose.setContent {
                 Column {
-                    VideoSection(session, info, container.files, container.video) { played += it }
+                    VideoSection(session, info, container.files, container.video) { menu, t -> played += if (menu) 0 else t }
                     DiscFilesSection(session, info, container.files) {}
                 }
             }

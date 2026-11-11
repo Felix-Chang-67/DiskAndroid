@@ -11,7 +11,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.felixchang67.diskandroid.DiskApp
-import io.github.felixchang67.diskandroid.core.player.DvdPlayer
+import io.github.felixchang67.diskandroid.core.player.DiscPlayer
 import kotlinx.coroutines.launch
 
 /**
@@ -60,26 +60,32 @@ class VideoPlayerActivity : ComponentActivity() {
         val s = video.screen.value?.state ?: return super.onKeyDown(keyCode, event)
         val menu = s.inMenu
         when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> if (menu) video.command(DvdPlayer.CMD_UP) else return super.onKeyDown(keyCode, event)
-            KeyEvent.KEYCODE_DPAD_DOWN -> if (menu) video.command(DvdPlayer.CMD_DOWN) else return super.onKeyDown(keyCode, event)
-            KeyEvent.KEYCODE_DPAD_LEFT -> if (menu) video.command(DvdPlayer.CMD_LEFT) else seekBy(s, -10_000)
-            KeyEvent.KEYCODE_DPAD_RIGHT -> if (menu) video.command(DvdPlayer.CMD_RIGHT) else seekBy(s, 10_000)
+            KeyEvent.KEYCODE_DPAD_UP -> if (menu) video.command(DiscPlayer.CMD_UP) else return super.onKeyDown(keyCode, event)
+            KeyEvent.KEYCODE_DPAD_DOWN -> if (menu) video.command(DiscPlayer.CMD_DOWN) else return super.onKeyDown(keyCode, event)
+            KeyEvent.KEYCODE_DPAD_LEFT -> if (menu) video.command(DiscPlayer.CMD_LEFT) else seekBy(s, -10_000)
+            KeyEvent.KEYCODE_DPAD_RIGHT -> if (menu) video.command(DiscPlayer.CMD_RIGHT) else seekBy(s, 10_000)
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER ->
-                if (menu) video.command(DvdPlayer.CMD_ACTIVATE) else video.togglePause()
+                if (menu) video.command(DiscPlayer.CMD_ACTIVATE) else video.togglePause()
             KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> video.togglePause()
             KeyEvent.KEYCODE_MEDIA_PLAY -> video.resume()
             KeyEvent.KEYCODE_MEDIA_PAUSE -> video.pause()
-            KeyEvent.KEYCODE_MEDIA_NEXT -> video.command(DvdPlayer.CMD_NEXT_CHAPTER)
-            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> video.command(DvdPlayer.CMD_PREV_CHAPTER)
+            KeyEvent.KEYCODE_MEDIA_NEXT -> video.command(DiscPlayer.CMD_NEXT_CHAPTER)
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> video.command(DiscPlayer.CMD_PREV_CHAPTER)
             KeyEvent.KEYCODE_MEDIA_STOP -> close("停止键")
-            KeyEvent.KEYCODE_MENU -> video.command(DvdPlayer.CMD_MENU, DvdPlayer.MENU_ROOT)
+            KeyEvent.KEYCODE_MENU -> when {
+                !s.isBluray -> video.command(DiscPlayer.CMD_MENU, DiscPlayer.MENU_ROOT)
+                // 蓝光：播放中有弹出菜单就开关它，否则回顶层菜单
+                s.popup -> video.command(DiscPlayer.CMD_MENU, DiscPlayer.BD_MENU_POPUP)
+                s.bdMode == DiscPlayer.BD_MODE_MENU -> video.command(DiscPlayer.CMD_MENU, DiscPlayer.BD_MENU_TOP)
+                else -> return super.onKeyDown(keyCode, event)
+            }
             else -> return super.onKeyDown(keyCode, event)
         }
         return true
     }
 
-    private fun seekBy(s: DvdPlayer.State, deltaMs: Long) {
-        if (s.domain != DvdPlayer.Domain.TITLE || s.durationMs <= 0) return
-        video.command(DvdPlayer.CMD_SEEK_MS, (s.positionMs + deltaMs).coerceIn(0, s.durationMs - 1000).toInt())
+    private fun seekBy(s: DiscPlayer.State, deltaMs: Long) {
+        if (s.domain != DiscPlayer.Domain.TITLE || s.durationMs <= 0) return
+        video.command(DiscPlayer.CMD_SEEK_MS, (s.positionMs + deltaMs).coerceIn(0, s.durationMs - 1000).toInt())
     }
 }

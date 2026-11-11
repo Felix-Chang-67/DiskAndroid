@@ -12,6 +12,7 @@ endif()
 add_library(diskplayer SHARED
         android/dp_android.c
         src/dp_av.c
+        src/dp_bd.c
         src/dp_core.c
         src/dp_dvd.c
         src/dp_spu.c)
@@ -24,6 +25,8 @@ target_compile_options(diskplayer PRIVATE
 
 # 顺序：依赖方在前（dvdnav → dvdread；avfilter → swscale → swresample → avcodec → avutil）
 target_link_libraries(diskplayer
+        ${TP}/lib/libbluray.a
+        ${TP}/lib/libudfread.a
         ${TP}/lib/libdvdnav.a
         ${TP}/lib/libdvdread.a
         ${TP}/lib/libavfilter.a

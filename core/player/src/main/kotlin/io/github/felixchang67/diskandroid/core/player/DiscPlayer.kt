@@ -6,12 +6,13 @@ import kotlin.concurrent.write
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 /**
- * 原生 DVD 播放器（libdvdnav 导航，FFmpeg 解码，OpenGL ES 画面，AAudio 声音）。
- * 支持光盘自己的首播、菜单（按钮高亮、方向键、点按）、标题 / 章节跳转、音轨 / 字幕 / 角度切换。
+ * 原生光盘播放器：DVD（libdvdnav 导航）和蓝光（libbluray 导航），FFmpeg 解码，OpenGL ES 画面，AAudio 声音。
+ * 支持光盘自己的首播、菜单（DVD 按钮高亮、蓝光顶层 / 弹出菜单；方向键、点按）、标题 / 章节跳转、音轨 / 字幕 / 角度切换。
+ * 蓝光的 BD-J（Java）菜单在 Android 上做不了，这类盘直接播放主片。
  *
  * 线程：命令不阻塞（排队给原生导航线程）；[close] 会等原生线程结束（可能要等一次读盘完成），不要在主线程调用。
  */
-class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
+class DiscPlayer private constructor(private var handle: Long) : AutoCloseable {
 
     /** 打开参数。语言是两个字母的 ISO 639-1 代码。 */
     data class Options(
@@ -26,6 +27,21 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
         /** 每次向光驱要多少字节（光驱每条命令开销大，一次多读一些）。 */
         val prefetchBytes: Int = 256 * 1024,
     )
+
+    /** 蓝光的打开参数。语言是三个字母的 ISO 639-2 代码。 */
+    data class BlurayOptions(
+        val audioLanguage: String = "jpn",
+        val subtitleLanguage: String = "chi",
+        val menuLanguage: String = "jpn",
+        /** 播放器地区：A = 1（日本、北美、东亚除中国大陆）、B = 2、C = 4。 */
+        val region: Int = 1,
+        /** < 0 = 用光盘菜单；>= 0 = 直接播放这个播放列表（xxxxx.mpls）。 */
+        val startPlaylist: Int = -1,
+        val deinterlace: Boolean = true,
+        val prefetchBytes: Int = 512 * 1024,
+    )
+
+    enum class Kind { DVD, BLURAY }
 
     enum class Domain(val label: String) {
         STOP("停止"),
@@ -73,9 +89,25 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
         val framesShown: Long = 0,
         val framesDropped: Long = 0,
         val audioFrames: Long = 0,
+        val kind: Kind = Kind.DVD,
+        /** 蓝光：1 = 光盘菜单导航，2 = 直接播放播放列表。 */
+        val bdMode: Int = 0,
+        /** 蓝光：有弹出菜单可用。 */
+        val popup: Boolean = false,
+        /** 蓝光：当前播放列表（xxxxx.mpls）。 */
+        val playlist: Int = -1,
+        /** 蓝光：光盘菜单是 BD-J，没法用，在直接播放主片。 */
+        val bdj: Boolean = false,
+        val planeWidth: Int = 0,
+        val planeHeight: Int = 0,
+        /** 正在用的解码器名（FFmpeg 的名字："h264"、"ac3"…）。 */
+        val videoCodec: String = "",
+        val audioCodec: String = "",
+        val error: String = "",
     ) {
-        /** 正在菜单里（有可以选的按钮）。 */
+        /** 正在菜单里（有可以选的按钮 / 蓝光的交互菜单显示中）。 */
         val inMenu: Boolean get() = buttons > 0
+        val isBluray: Boolean get() = kind == Kind.BLURAY
     }
 
     companion object {
@@ -109,6 +141,15 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
         const val MENU_ANGLE = 6
         const val MENU_CHAPTER = 7
 
+        // 蓝光的 CMD_MENU 参数：顶层菜单 / 弹出菜单（开关）
+        const val BD_MENU_TOP = 0
+        const val BD_MENU_POPUP = 1
+
+        // 蓝光的 State.bdMode（与 dp_bd.h 的 DP_BD_MODE_* 一致）
+        const val BD_MODE_STOP = 0
+        const val BD_MODE_MENU = 1
+        const val BD_MODE_PLAYLIST = 2
+
         // 事件（与 dp_core.h 的 DP_EV_* 一致）
         const val EV_STATE = 1
         const val EV_STILL = 2
@@ -117,7 +158,7 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
         const val EV_ERROR = 5
         const val EV_FIRST_FRAME = 6
 
-        private const val INTS = 25
+        private const val INTS = 33
         private const val LONGS = 7
 
         /**
@@ -125,7 +166,7 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
          * @param sizeBytes 盘的大小（READ CAPACITY × 2048）
          * @throws PlayerException 原生库不可用、不是 DVD-Video、IFO 读不出
          */
-        fun open(reader: SectorReader, sizeBytes: Long, listener: PlayerListener, options: Options): DvdPlayer {
+        fun open(reader: SectorReader, sizeBytes: Long, listener: PlayerListener, options: Options): DiscPlayer {
             if (!NativeBridge.isAvailable) throw PlayerException("播放器原生库加载失败：${NativeBridge.loadErrorText}")
             val err = arrayOfNulls<String>(1)
             val h = NativeBridge.nativeOpenDvd(
@@ -134,7 +175,22 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
                 options.startTitle, options.deinterlace, options.prefetchBytes, err,
             )
             if (h == 0L) throw PlayerException(err[0] ?: "打不开这张 DVD")
-            return DvdPlayer(h)
+            return DiscPlayer(h)
+        }
+
+        /**
+         * 打开一张蓝光（读 index.bdmv / 播放列表，检查加密）。还不开始播放，先 [setSurface] 再 [start]。
+         * @throws PlayerException 原生库不可用、不是蓝光、需要解密、播放列表打不开
+         */
+        fun openBluray(reader: SectorReader, sizeBytes: Long, listener: PlayerListener, options: BlurayOptions): DiscPlayer {
+            if (!NativeBridge.isAvailable) throw PlayerException("播放器原生库加载失败：${NativeBridge.loadErrorText}")
+            val err = arrayOfNulls<String>(1)
+            val h = NativeBridge.nativeOpenBluray(
+                reader, sizeBytes, listener, options.audioLanguage, options.subtitleLanguage, options.menuLanguage,
+                options.region, options.startPlaylist, options.deinterlace, options.prefetchBytes, err,
+            )
+            if (h == 0L) throw PlayerException(err[0] ?: "打不开这张蓝光")
+            return DiscPlayer(h)
         }
 
         /** 原生代码给的状态数组 → [State]。 */
@@ -142,6 +198,7 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
             val audioCount = ints[10]
             val spuCount = ints[12]
             val s = strings ?: emptyArray()
+            val extra = s.drop(audioCount + spuCount)
             return State(
                 domain = Domain.entries.getOrElse(ints[0]) { Domain.STOP },
                 title = ints[1],
@@ -175,6 +232,16 @@ class DvdPlayer private constructor(private var handle: Long) : AutoCloseable {
                 framesShown = longs[4],
                 framesDropped = longs[5],
                 audioFrames = longs[6],
+                kind = if (ints[25] == 1) Kind.BLURAY else Kind.DVD,
+                bdMode = ints[26],
+                popup = ints[28] != 0,
+                playlist = if (ints[25] == 1) ints[29] else -1,
+                bdj = ints[30] != 0,
+                planeWidth = ints[31],
+                planeHeight = ints[32],
+                videoCodec = extra.getOrElse(0) { "" },
+                audioCodec = extra.getOrElse(1) { "" },
+                error = extra.getOrElse(2) { "" },
             )
         }
 

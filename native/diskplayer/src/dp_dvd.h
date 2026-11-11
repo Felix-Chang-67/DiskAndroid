@@ -43,6 +43,7 @@ typedef struct {
     char volume[40];
     uint64_t bytes_read, read_errors, frames_shown, frames_dropped, audio_frames;
     int64_t clock_pts;
+    int video_codec_id, audio_codec_id;  /* 正在用的解码器（FFmpeg AVCodecID） */
 } dp_dvd_state;
 
 enum {

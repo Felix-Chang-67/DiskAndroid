@@ -107,8 +107,8 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
         c.player.play(drive.session, disc, track)
     }
 
-    /** 播放这台光驱里的 DVD：[startTitle] = 0 从光盘菜单开始，> 0 直接播放这个标题。 */
-    fun playVideo(deviceName: String, startTitle: Int) {
+    /** 播放这台光驱里的视频盘：[menu] = 从光盘菜单开始；否则直接播放 [target]（DVD 标题号 / 蓝光播放列表号）。 */
+    fun playVideo(deviceName: String, menu: Boolean, target: Int) {
         val drive = c.driveManager.drives.value[deviceName]
         val disc = drive?.session?.disc?.value
         if (drive == null || disc == null) {
@@ -116,7 +116,7 @@ class MainViewModel(private val c: AppContainer) : ViewModel() {
             return
         }
         val label = c.files.states.value[drive.session]?.info?.volume?.label
-        c.video.play(drive.session, disc, startTitle, label, "用户点了播放")?.let { _messages.tryEmit(it) }
+        c.video.playDisc(drive.session, disc, menu, target, label, "用户点了播放")?.let { _messages.tryEmit(it) }
     }
 
     /** 把盘上的文件 / 文件夹复制到保存位置。 */

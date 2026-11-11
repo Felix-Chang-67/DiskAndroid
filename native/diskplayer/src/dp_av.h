@@ -29,6 +29,7 @@ typedef struct {
     uint64_t frames_shown, frames_dropped, audio_frames;
     int video_w, video_h;
     int64_t clock_pts;
+    int video_codec, audio_codec;   /* 正在用的解码器（AVCodecID），0 = 还没有 */
 } dp_av_stats;
 
 dp_av *dp_av_new(const dp_platform *pf, const dp_av_options *opt);

@@ -56,7 +56,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import io.github.felixchang67.diskandroid.core.player.DvdPlayer
+import io.github.felixchang67.diskandroid.core.player.DiscPlayer
 import io.github.felixchang67.diskandroid.core.video.Languages
 import io.github.felixchang67.diskandroid.core.video.formatDuration
 import kotlinx.coroutines.delay
@@ -197,7 +197,7 @@ private fun BoxScope.Overlay(video: VideoPlaybackController, sc: VideoPlaybackCo
 private fun TopBar(
     video: VideoPlaybackController,
     sc: VideoPlaybackController.Screen,
-    s: DvdPlayer.State,
+    s: DiscPlayer.State,
     dpad: Boolean,
     onDpad: () -> Unit,
     onClose: () -> Unit,
@@ -216,10 +216,20 @@ private fun TopBar(
             Text(sc.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(where(s), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.75f), maxLines = 1)
         }
-        TextButton(onClick = { onTouch(); video.command(DvdPlayer.CMD_MENU, DvdPlayer.MENU_ROOT) }) { Text("光盘菜单") }
-        TextButton(onClick = { onTouch(); video.command(DvdPlayer.CMD_MENU, DvdPlayer.MENU_TITLE) }) { Text("标题菜单") }
-        if (s.domain == DvdPlayer.Domain.VTS_MENU || s.domain == DvdPlayer.Domain.VMG_MENU) {
-            TextButton(onClick = { onTouch(); video.command(DvdPlayer.CMD_GO_UP) }) { Text("返回上级") }
+        if (s.isBluray) {
+            // 蓝光：顶层菜单（光盘程序导航时才有）、弹出菜单（光盘说有的时候；再按一次关闭）
+            if (s.bdMode == DiscPlayer.BD_MODE_MENU) {
+                TextButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_MENU, DiscPlayer.BD_MENU_TOP) }) { Text("顶层菜单") }
+            }
+            if (s.popup) {
+                TextButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_MENU, DiscPlayer.BD_MENU_POPUP) }) { Text("弹出菜单") }
+            }
+        } else {
+            TextButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_MENU, DiscPlayer.MENU_ROOT) }) { Text("光盘菜单") }
+            TextButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_MENU, DiscPlayer.MENU_TITLE) }) { Text("标题菜单") }
+            if (s.domain == DiscPlayer.Domain.VTS_MENU || s.domain == DiscPlayer.Domain.VMG_MENU) {
+                TextButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_GO_UP) }) { Text("返回上级") }
+            }
         }
         if (s.audio.isNotEmpty()) {
             Picker(
@@ -227,16 +237,16 @@ private fun TopBar(
                 items = s.audio.mapIndexed { i, a -> "${i + 1}. ${audioName(a)}" },
                 selected = s.audioCurrent,
                 onTouch = onTouch,
-            ) { i -> video.command(DvdPlayer.CMD_AUDIO, i) }
+            ) { i -> video.command(DiscPlayer.CMD_AUDIO, i) }
         }
         if (s.subtitles.isNotEmpty()) {
             val cur = if (s.subtitleShown) s.subtitleCurrent else -1
             Picker(
-                label = "字幕：" + (if (cur >= 0) s.subtitles.getOrNull(cur)?.let { Languages.name(it) } ?: "?" else "关"),
-                items = listOf("关闭") + s.subtitles.mapIndexed { i, l -> "${i + 1}. ${Languages.name(l)}" },
+                label = "字幕：" + (if (cur >= 0) s.subtitles.getOrNull(cur)?.let { subtitleName(it) } ?: "?" else "关"),
+                items = listOf("关闭") + s.subtitles.mapIndexed { i, l -> "${i + 1}. ${subtitleName(l)}" },
                 selected = cur + 1,
                 onTouch = onTouch,
-            ) { i -> video.command(DvdPlayer.CMD_SUBTITLE, i - 1) }
+            ) { i -> video.command(DiscPlayer.CMD_SUBTITLE, i - 1) }
         }
         if (s.angles > 1) {
             Picker(
@@ -244,21 +254,21 @@ private fun TopBar(
                 items = (1..s.angles).map { "角度 $it" },
                 selected = s.angle - 1,
                 onTouch = onTouch,
-            ) { i -> video.command(DvdPlayer.CMD_ANGLE, i + 1) }
+            ) { i -> video.command(DiscPlayer.CMD_ANGLE, i + 1) }
         }
         TextButton(onClick = { onTouch(); onDpad() }) { Text(if (dpad) "收起方向键" else "方向键") }
     }
 }
 
 @Composable
-private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackController.Screen, s: DvdPlayer.State, onTouch: () -> Unit) {
+private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackController.Screen, s: DiscPlayer.State, onTouch: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
             .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
-        val seekable = s.domain == DvdPlayer.Domain.TITLE && s.durationMs > 0
+        val seekable = s.domain == DiscPlayer.Domain.TITLE && s.durationMs > 0
         var dragging by remember { mutableStateOf(false) }
         var dragValue by remember { mutableFloatStateOf(0f) }
         if (seekable) {
@@ -273,7 +283,7 @@ private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackControlle
                         dragValue = it
                     },
                     onValueChangeFinished = {
-                        video.command(DvdPlayer.CMD_SEEK_MS, dragValue.toInt())
+                        video.command(DiscPlayer.CMD_SEEK_MS, dragValue.toInt())
                         dragging = false
                     },
                     valueRange = 0f..s.durationMs.toFloat(),
@@ -283,7 +293,7 @@ private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackControlle
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedButton(onClick = { onTouch(); video.command(DvdPlayer.CMD_PREV_CHAPTER) }) { Text("上一章") }
+            OutlinedButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_PREV_CHAPTER) }) { Text("上一章") }
             if (seekable) {
                 OutlinedButton(onClick = { onTouch(); seek(video, s, -10_000) }) { Text("−10 秒") }
             }
@@ -291,22 +301,34 @@ private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackControlle
             if (seekable) {
                 OutlinedButton(onClick = { onTouch(); seek(video, s, 30_000) }) { Text("+30 秒") }
             }
-            OutlinedButton(onClick = { onTouch(); video.command(DvdPlayer.CMD_NEXT_CHAPTER) }) { Text("下一章") }
-            if (s.title > 0 && s.chapters > 1) {
+            OutlinedButton(onClick = { onTouch(); video.command(DiscPlayer.CMD_NEXT_CHAPTER) }) { Text("下一章") }
+            if (s.chapters > 1 && !s.inMenu && (s.isBluray || s.title > 0)) {
                 Picker(
                     label = "第 ${s.chapter}/${s.chapters} 章",
                     items = (1..s.chapters).map { "第 $it 章" },
                     selected = s.chapter - 1,
                     onTouch = onTouch,
-                ) { i -> video.command(DvdPlayer.CMD_PART_PLAY, s.title, i + 1) }
+                ) { i -> video.command(DiscPlayer.CMD_PART_PLAY, s.title, i + 1) }
             }
-            if (s.titles > 0) {
+            if (s.isBluray && s.bdMode == DiscPlayer.BD_MODE_PLAYLIST) {
+                // 直接播放模式（没有菜单 / BD-J 盘）：列盘上的播放列表，换着播
+                val playlists = sc.titleInfo.keys.sorted()
+                if (playlists.isNotEmpty()) {
+                    Picker(
+                        label = if (s.playlist >= 0) "播放列表 %05d".format(s.playlist) else "播放列表",
+                        items = playlists.map { n -> sc.titleInfo[n] ?: "%05d.mpls".format(n) },
+                        selected = playlists.indexOf(s.playlist),
+                        onTouch = onTouch,
+                    ) { i -> video.command(DiscPlayer.CMD_TITLE_PLAY, playlists[i]) }
+                }
+            } else if (s.titles > 0) {
+                val playingTitle = s.domain == DiscPlayer.Domain.TITLE && s.title in 1..s.titles
                 Picker(
-                    label = if (s.domain == DvdPlayer.Domain.TITLE) "标题 ${s.title}/${s.titles}" else "标题",
-                    items = (1..s.titles).map { n -> "标题 $n" + (sc.titleInfo[n]?.let { " · $it" } ?: "") },
-                    selected = if (s.domain == DvdPlayer.Domain.TITLE) s.title - 1 else -1,
+                    label = if (playingTitle) "标题 ${s.title}/${s.titles}" else "标题",
+                    items = (1..s.titles).map { n -> "标题 $n" + (if (s.isBluray) "" else sc.titleInfo[n]?.let { " · $it" } ?: "") },
+                    selected = if (playingTitle) s.title - 1 else -1,
                     onTouch = onTouch,
-                ) { i -> video.command(DvdPlayer.CMD_TITLE_PLAY, i + 1) }
+                ) { i -> video.command(DiscPlayer.CMD_TITLE_PLAY, i + 1) }
             }
             Spacer(Modifier.weight(1f))
             Text(stats(s), style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.6f), textAlign = TextAlign.End)
@@ -314,8 +336,8 @@ private fun BottomBar(video: VideoPlaybackController, sc: VideoPlaybackControlle
     }
 }
 
-private fun seek(video: VideoPlaybackController, s: DvdPlayer.State, deltaMs: Long) {
-    video.command(DvdPlayer.CMD_SEEK_MS, (s.positionMs + deltaMs).coerceIn(0, (s.durationMs - 1000).coerceAtLeast(0)).toInt())
+private fun seek(video: VideoPlaybackController, s: DiscPlayer.State, deltaMs: Long) {
+    video.command(DiscPlayer.CMD_SEEK_MS, (s.positionMs + deltaMs).coerceIn(0, (s.durationMs - 1000).coerceAtLeast(0)).toInt())
 }
 
 /** 下拉选择（音轨、字幕、角度、章节、标题）。 */
@@ -349,15 +371,15 @@ private fun DPad(video: VideoPlaybackController, modifier: Modifier) {
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        PadKey("▲") { video.command(DvdPlayer.CMD_UP) }
+        PadKey("▲") { video.command(DiscPlayer.CMD_UP) }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PadKey("◀") { video.command(DvdPlayer.CMD_LEFT) }
+            PadKey("◀") { video.command(DiscPlayer.CMD_LEFT) }
             Box(Modifier.padding(4.dp)) {
-                Button(onClick = { video.command(DvdPlayer.CMD_ACTIVATE) }, shape = CircleShape, modifier = Modifier.size(64.dp)) { Text("确定") }
+                Button(onClick = { video.command(DiscPlayer.CMD_ACTIVATE) }, shape = CircleShape, modifier = Modifier.size(64.dp)) { Text("确定") }
             }
-            PadKey("▶") { video.command(DvdPlayer.CMD_RIGHT) }
+            PadKey("▶") { video.command(DiscPlayer.CMD_RIGHT) }
         }
-        PadKey("▼") { video.command(DvdPlayer.CMD_DOWN) }
+        PadKey("▼") { video.command(DiscPlayer.CMD_DOWN) }
     }
 }
 
@@ -394,30 +416,69 @@ private fun Notice(text: String, modifier: Modifier) {
     )
 }
 
-/** "正片 · 标题 2/5 · 第 3/12 章" / "主菜单（4 个按钮）"。 */
-private fun where(s: DvdPlayer.State): String = when {
-    s.inMenu -> "${s.domain.label}（${s.buttons} 个按钮）" + if (s.still) " · 静止画面" else ""
-    s.domain == DvdPlayer.Domain.TITLE -> "标题 ${s.title}/${s.titles} · 第 ${s.chapter}/${s.chapters} 章" +
-        (if (s.wide) " · 16:9" else "") + if (s.paused) " · 已暂停" else ""
-    else -> s.domain.label + if (s.still) " · 静止画面" else ""
+/** "正片 · 标题 2/5 · 第 3/12 章" / "主菜单（4 个按钮）" / 蓝光 "标题 1/3 · 00800.mpls · 第 2/24 章"。 */
+internal fun where(s: DiscPlayer.State): String {
+    if (s.isBluray) return whereBluray(s)
+    return when {
+        s.inMenu -> "${s.domain.label}（${s.buttons} 个按钮）" + if (s.still) " · 静止画面" else ""
+        s.domain == DiscPlayer.Domain.TITLE -> "标题 ${s.title}/${s.titles} · 第 ${s.chapter}/${s.chapters} 章" +
+            (if (s.wide) " · 16:9" else "") + if (s.paused) " · 已暂停" else ""
+        else -> s.domain.label + if (s.still) " · 静止画面" else ""
+    }
 }
 
-/** "ja AC-3 2ch" → "日语 AC-3 2ch"。 */
-private fun audioName(desc: String): String {
+private fun whereBluray(s: DiscPlayer.State): String {
+    val parts = mutableListOf<String>()
+    when {
+        s.inMenu -> parts += if (s.title == 0) "顶层菜单" else "光盘菜单"
+        s.domain == DiscPlayer.Domain.STOP -> parts += "停止"
+    }
+    if (s.bdMode == DiscPlayer.BD_MODE_MENU && s.title in 1..s.titles) parts += "标题 ${s.title}/${s.titles}"
+    if (s.playlist >= 0) parts += "%05d.mpls".format(s.playlist)
+    if (!s.inMenu && s.chapters > 0 && s.chapter > 0) parts += "第 ${s.chapter}/${s.chapters} 章"
+    if (s.still) parts += "静止画面"
+    if (s.paused) parts += "已暂停"
+    if (s.bdj) parts += "BD-J 菜单不支持，直接播放主片"
+    return parts.joinToString(" · ").ifEmpty { "蓝光" }
+}
+
+/** "ja AC-3 2ch" → "日语 AC-3 2ch"（蓝光是 "jpn LPCM 2ch"；没有语言的是 "--" / "---"）。 */
+internal fun audioName(desc: String): String {
     val lang = desc.substringBefore(' ')
     val rest = desc.substringAfter(' ', "")
-    return (if (lang == "--") "" else Languages.name(lang) + " ") + rest
+    return (if (lang.isEmpty() || lang.all { it == '-' }) "" else Languages.name(lang) + " ") + rest
 }
 
-private fun stats(s: DvdPlayer.State): String {
-    val stream = when (s.audioStream) {
+/** 字幕语言（"---" = 没标语言）。 */
+private fun subtitleName(lang: String): String = if (lang.isEmpty() || lang.all { it == '-' }) "未标语言" else Languages.name(lang)
+
+/** FFmpeg 解码器名 → 常见叫法。 */
+internal fun codecLabel(name: String): String = when (name) {
+    "h264" -> "H.264"
+    "hevc" -> "HEVC"
+    "mpeg2video" -> "MPEG-2"
+    "mpeg1video" -> "MPEG-1"
+    "vc1" -> "VC-1"
+    "ac3" -> "AC-3"
+    "eac3" -> "E-AC-3"
+    "truehd" -> "TrueHD"
+    "mlp" -> "MLP"
+    "dca", "dts" -> "DTS"
+    "pcm_bluray", "pcm_dvd" -> "LPCM"
+    "mp1", "mp2", "mp3" -> "MPEG 音频"
+    else -> name
+}
+
+internal fun stats(s: DiscPlayer.State): String {
+    val audio = s.audioCodec.takeIf { it.isNotEmpty() }?.let { codecLabel(it) } ?: when (s.audioStream) {
         in 0x80..0x87 -> "AC-3"
         in 0x88..0x8F -> "DTS"
         in 0xA0..0xA7 -> "LPCM"
         in 0xC0..0xDF -> "MPEG"
         else -> null
     }
-    return "${s.videoWidth}×${s.videoHeight}" + (stream?.let { " · $it" } ?: "") +
+    val video = s.videoCodec.takeIf { it.isNotEmpty() }?.let { codecLabel(it) }
+    return listOfNotNull(video, "${s.videoWidth}×${s.videoHeight}", audio).joinToString(" ") +
         " · 读盘 ${s.bytesRead / 1_048_576} MB" + (if (s.readErrors > 0) " · 补零 ${s.readErrors} 扇区" else "") +
         " · 丢帧 ${s.framesDropped}"
 }

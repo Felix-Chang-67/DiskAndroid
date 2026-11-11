@@ -38,7 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.felixchang67.diskandroid.core.drive.DiscInfo
 import io.github.felixchang67.diskandroid.core.drive.DriveSession
-import io.github.felixchang67.diskandroid.core.fs.ContentKind
+import io.github.felixchang67.diskandroid.core.fs.DiscContent
 import io.github.felixchang67.diskandroid.core.video.VideoDiscInfo
 import io.github.felixchang67.diskandroid.core.video.VideoFormat
 import io.github.felixchang67.diskandroid.core.video.VideoTitle
@@ -57,7 +57,13 @@ import kotlinx.coroutines.delay
  * 音轨和字幕、地区码、这台平板有没有对应的解码器。
  */
 @Composable
-fun VideoSection(session: DriveSession, disc: DiscInfo, browser: DiscBrowser, video: VideoPlaybackController, onPlay: (title: Int) -> Unit) {
+fun VideoSection(
+    session: DriveSession,
+    disc: DiscInfo,
+    browser: DiscBrowser,
+    video: VideoPlaybackController,
+    onPlay: (menu: Boolean, target: Int) -> Unit,
+) {
     val states by browser.states.collectAsStateWithLifecycle()
     val s = states[session]?.takeIf { it.fingerprint == CdPlaybackController.fingerprint(disc) } ?: return
     val v = s.video ?: return
@@ -77,8 +83,8 @@ fun VideoSection(session: DriveSession, disc: DiscInfo, browser: DiscBrowser, vi
             }
             info == null -> Text(v.error?.let { "读不出标题列表：$it" } ?: "没有识别出视频结构", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             else -> {
-                PlayBlock(v, info, session, disc, video, s.info?.content?.kinds?.toSet(), onPlay)
-                Titles(v, info, session, disc, browser, playable = info.format == VideoFormat.DVD_VIDEO && video.refusal(disc, s.info?.content?.kinds?.toSet()) == null, onPlay)
+                PlayBlock(v, info, session, disc, video, s.info?.content, onPlay)
+                Titles(v, info, session, disc, browser, playable = video.refusal(disc, s.info?.content) == null, onPlay)
             }
         }
     }
@@ -92,8 +98,8 @@ private fun PlayBlock(
     session: DriveSession,
     disc: DiscInfo,
     video: VideoPlaybackController,
-    content: Set<ContentKind>?,
-    onPlay: (Int) -> Unit,
+    content: DiscContent?,
+    onPlay: (Boolean, Int) -> Unit,
 ) {
     val context = LocalContext.current
     val screen by video.screen.collectAsStateWithLifecycle()
@@ -123,20 +129,21 @@ private fun PlayBlock(
                 VideoAutoplayBanner(p.startAtMs, p.label, onCancel = { video.cancelAutoplay() }, onNow = { video.autoplayNow() })
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Button(onClick = { onPlay(0) }) { Text("▶ 从光盘菜单开始") }
-                val main = v.chosen?.dvd?.number
+                Button(onClick = { onPlay(true, 0) }) { Text("▶ 从光盘菜单开始") }
+                val chosen = v.chosen
+                val main = chosen?.let { playTarget(it) }
                 if (main != null) {
-                    FilledTonalButton(onClick = { onPlay(main) }) {
-                        Text(if (v.selected == null) "▶ 直接播放主片（标题 $main）" else "▶ 直接播放选中的标题 $main")
+                    FilledTonalButton(onClick = { onPlay(false, main) }) {
+                        Text(if (v.selected == null) "▶ 直接播放主片（${chosen.id}）" else "▶ 直接播放选中的${chosen.id}")
                     }
                 }
             }
         }
     }
-    if (info.format == VideoFormat.DVD_VIDEO) {
+    run {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Switch(checked = autoplay, onCheckedChange = { video.setAutoplay(it) })
-            Text("放入 DVD 视频盘后自动播放（2 秒后开始，可取消）", style = MaterialTheme.typography.bodySmall)
+            Text("放入视频盘（DVD / 蓝光）后自动播放（2 秒后开始，可取消）", style = MaterialTheme.typography.bodySmall)
         }
         if (autoplay) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -181,7 +188,7 @@ private fun Titles(
     disc: DiscInfo,
     browser: DiscBrowser,
     playable: Boolean,
-    onPlay: (Int) -> Unit,
+    onPlay: (Boolean, Int) -> Unit,
 ) {
     Text(
         "${info.format.label} · ${info.titles.size} 个标题" +
@@ -190,9 +197,8 @@ private fun Titles(
     )
     val protection = when {
         disc.dvdCopyright?.isCss == true -> "CSS 加密：播放时用导入的 DVD 解密组件向光驱认证"
-        info.aacs -> "AACS 加密：标题列表可以看，播放要用阶段 3 的解密组件"
-        info.format == VideoFormat.DVD_VIDEO -> "没有加密"
-        else -> "没有加密：蓝光播放在 N2.4 加入"
+        info.aacs -> "AACS 加密：播放时用导入的蓝光解密组件和 KEYDB.cfg"
+        else -> "没有加密"
     }
     Text(protection, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     info.warnings.forEach { Text("· $it", style = MaterialTheme.typography.bodySmall, color = StatusColors.warn) }
@@ -209,7 +215,7 @@ private fun Titles(
     val others = info.titles.filter { it !== chosen && (showShort || it.durationMs >= VideoDiscInfo.SHORT_MS) }
     if (others.isNotEmpty()) Text("其他标题", style = MaterialTheme.typography.labelMedium)
     others.take(if (showAll) others.size else 8).forEach { t ->
-        TitleRow(t, isMain = t === info.main, onPlay = t.dvd?.number?.takeIf { playable }?.let { n -> { onPlay(n) } }) { browser.selectTitle(session, t.id) }
+        TitleRow(t, isMain = t === info.main, onPlay = playTarget(t)?.takeIf { playable }?.let { n -> { onPlay(false, n) } }) { browser.selectTitle(session, t.id) }
     }
     if (!showAll && others.size > 8) TextButton(onClick = { showAll = true }) { Text("显示全部 ${others.size} 个") }
     val hiddenShort = info.titles.count { it !== chosen && it.durationMs < VideoDiscInfo.SHORT_MS }
@@ -270,3 +276,6 @@ private fun DecoderLine(t: VideoTitle) {
     }
     Text("解码器：" + parts.joinToString("；"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
+
+/** 直接播放用的编号：DVD 是标题号，蓝光是播放列表号（00800.mpls → 800）。 */
+private fun playTarget(t: VideoTitle): Int? = t.dvd?.number ?: t.bd?.name?.take(5)?.toIntOrNull()

@@ -68,6 +68,18 @@ object Languages {
         val n = Locale.forLanguageTag(two).getDisplayLanguage(Locale.SIMPLIFIED_CHINESE)
         return if (n.isBlank() || n.equals(two, ignoreCase = true)) c else n
     }
+
+    /** 统一成两个字母的代码（"jpn" → "ja"、"chi" / "zho" → "zh"；没收录的原样小写）；不是语言代码为 null。 */
+    fun normalize(code: String?): String? {
+        val c = code?.trim()?.lowercase()?.takeIf { it.isNotEmpty() && it.all { ch -> ch in 'a'..'z' } } ?: return null
+        return special[c] ?: c
+    }
+
+    /** 两个代码是不是同一种语言（DVD 的两个字母和蓝光的三个字母可以比）。 */
+    fun same(a: String?, b: String?): Boolean {
+        val x = normalize(a) ?: return false
+        return x == normalize(b)
+    }
 }
 
 /** 毫秒 → "1:35:00" / "4:07"。 */

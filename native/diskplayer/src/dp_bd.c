@@ -1117,6 +1117,8 @@ void dp_bd_get_state(dp_bd *d, dp_bd_state *out) {
     out->audio_frames = as.audio_frames;
     out->video_w = as.video_w;
     out->video_h = as.video_h;
+    out->video_codec_id = as.video_codec;
+    out->audio_codec_id = as.audio_codec;
 }
 
 void dp_bd_refresh(dp_bd *d) {
