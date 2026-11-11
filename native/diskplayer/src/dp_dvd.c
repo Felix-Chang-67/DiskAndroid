@@ -82,6 +82,7 @@ struct dp_dvd {
     int64_t sys_pts, sys_us;
     bool clk_paused;
     int64_t pause_us;
+    bool clk_from_audio;             /* 最近一次取时钟用的是音频（统计用） */
 
     /* ---- 视频线程的唤醒（静止画面时高亮变了要重画）---- */
     pthread_mutex_t vlock;
@@ -136,6 +137,7 @@ static int64_t clock_now(dp_dvd *d) {
         while (i > 0 && d->amap[i].frame > played) i--;
         if (d->amap[i].frame <= played) r = d->amap[i].pts + (played - d->amap[i].frame) * 90000 / OUT_RATE;
     }
+    d->clk_from_audio = r != DP_NOPTS;
     if (r == DP_NOPTS && d->sys_valid) {
         int64_t t = d->clk_paused ? d->pause_us : now;
         r = d->sys_pts + (t - d->sys_us) * 9 / 100;
@@ -257,6 +259,12 @@ typedef struct {
     bool ov_has;
     bool need_first;
     int64_t last_pts;
+    double out_fps;              /* 这一帧的输出帧率（给平台挑屏幕刷新率） */
+    /* 每 10 秒一次的播放统计 */
+    int64_t st_start_us, st_last_present_us, st_max_gap_us, st_max_late_us, st_decode_max_us;
+    int st_shown, st_dropped, st_late;
+    int64_t st_xruns0;
+    uint64_t st_read_us0, st_upcalls0;
 } vstate;
 
 static void v_reset_codec(vstate *v) {
@@ -313,8 +321,14 @@ static void v_idle(dp_dvd *d, vstate *v) {
     if (refresh && v->last->data[0]) v_present(d, v, v->last, true);
 }
 
-/* 按时钟等到该显示的时候；返回 false 表示太晚了要丢掉，或者要退出 / 清空了。 */
-static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
+/*
+ * 按时钟等到该显示的时候；返回 false 表示太晚了要丢掉，或者要退出 / 清空了。
+ * 提前 PRESENT_LEAD 交出去，同时告诉平台这一帧应该在什么时刻显示（*present_ns），由系统对准屏幕刷新，
+ * 比"到点再画"更均匀（屏幕 60 / 120 / 144 Hz 时都一样）。
+ */
+#define PRESENT_LEAD (90 * 12)
+static bool v_wait(dp_dvd *d, vstate *v, int64_t pts, int64_t *present_ns) {
+    *present_ns = 0;
     if (!d->pf.realtime) return true;
     int gen = d->flush_gen;
     for (;;) {
@@ -330,10 +344,15 @@ static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
             return true;
         }
         int64_t diff = pts - now;
-        if (diff <= 0) {
+        if (diff <= PRESENT_LEAD) {
             if (-diff > LATE_DROP && !v->need_first && !d->in_still) return false;
             /* 跳转后、或者音频时钟远远落后（例如刚开始）时，以这一帧重新对齐系统时钟 */
             if (-diff > 90 * 3000) clock_anchor(d, pts);
+            if (diff > 0) *present_ns = dp_now_us() * 1000 + diff * 100000 / 9;
+            if (-diff > 90 * 20) {
+                v->st_late++;
+                if (-diff * 100 / 9 > v->st_max_late_us) v->st_max_late_us = -diff * 100 / 9;
+            }
             return true;
         }
         if (diff > 90 * 2000) {
@@ -350,12 +369,42 @@ static bool v_wait(dp_dvd *d, vstate *v, int64_t pts) {
     }
 }
 
+/* 每 10 秒把播放统计写进日志（查卡顿用）。 */
+static void v_stats(dp_dvd *d, vstate *v, int64_t now_us) {
+    if (v->st_start_us == 0) {
+        v->st_start_us = now_us;
+        v->st_xruns0 = d->pf.audio_xruns ? d->pf.audio_xruns(d->pf.opaque) : 0;
+        v->st_read_us0 = d->src->read_us;
+        v->st_upcalls0 = d->src->upcalls;
+        return;
+    }
+    int64_t span = now_us - v->st_start_us;
+    if (span < 10000000) return;
+    int64_t xr = d->pf.audio_xruns ? d->pf.audio_xruns(d->pf.opaque) : 0;
+    dp_log(DP_LOG_INFO, TAG,
+           "播放统计（%.0f 秒）：显示 %d 帧（%.1f 帧/秒，输出 %.2f），丢 %d 帧，晚到 20 ms 以上 %d 帧（最晚 %lld ms），相邻两帧最长隔 %lld ms，"
+           "解码一帧最长 %lld ms；视频队列 %zu KB，音频队列 %zu KB；时钟：%s；音频欠载 %lld 次；读盘 %llu 次共 %llu ms（最长一次 %llu ms）",
+           span / 1e6, v->st_shown, v->st_shown * 1e6 / span, v->out_fps, v->st_dropped, v->st_late, (long long)(v->st_max_late_us / 1000),
+           (long long)(v->st_max_gap_us / 1000), (long long)(v->st_decode_max_us / 1000), dp_queue_bytes(&d->vq) / 1024, dp_queue_bytes(&d->aq) / 1024,
+           d->clk_from_audio ? "音频" : "系统", (long long)(xr - v->st_xruns0), (unsigned long long)(d->src->upcalls - v->st_upcalls0),
+           (unsigned long long)((d->src->read_us - v->st_read_us0) / 1000), (unsigned long long)(d->src->read_max_us / 1000));
+    d->src->read_max_us = 0;
+    v->st_start_us = now_us;
+    v->st_xruns0 = xr;
+    v->st_read_us0 = d->src->read_us;
+    v->st_upcalls0 = d->src->upcalls;
+    v->st_shown = v->st_dropped = v->st_late = 0;
+    v->st_max_gap_us = v->st_max_late_us = v->st_decode_max_us = 0;
+}
+
 static void v_present(dp_dvd *d, vstate *v, AVFrame *f, bool force) {
     int64_t pts = f->pts;
-    if (!force && !v_wait(d, v, pts)) {
+    int64_t present_ns = 0;
+    if (!force && !v_wait(d, v, pts, &present_ns)) {
         pthread_mutex_lock(&d->st_lock);
         d->st.frames_dropped++;
         pthread_mutex_unlock(&d->st_lock);
+        v->st_dropped++;
         return;
     }
     if (f->width != v->ov_w || f->height != v->ov_h) {
@@ -374,8 +423,19 @@ static void v_present(dp_dvd *d, vstate *v, AVFrame *f, bool force) {
         .pts = pts,
         .plane = {f->data[0], f->data[1], f->data[2]},
         .stride = {f->linesize[0], f->linesize[1], f->linesize[2]},
+        .fps = v->out_fps,
+        .present_ns = present_ns,
     };
     if (d->pf.video_present) d->pf.video_present(d->pf.opaque, &df, v->ov_has ? v->overlay : NULL, changed);
+    if (!force && d->pf.realtime) {
+        int64_t now_us = dp_now_us();
+        if (v->st_last_present_us && now_us - v->st_last_present_us > v->st_max_gap_us && !d->in_still && !clock_paused(d)) {
+            v->st_max_gap_us = now_us - v->st_last_present_us;
+        }
+        v->st_last_present_us = now_us;
+        v->st_shown++;
+        v_stats(d, v, now_us);
+    }
     if (v->last != f) {
         av_frame_unref(v->last);
         av_frame_ref(v->last, f);
@@ -398,9 +458,12 @@ static void v_output(dp_dvd *d, vstate *v, AVFrame *f, bool drain) {
     if (f->pts == AV_NOPTS_VALUE && v->last_pts != DP_NOPTS) f->pts = v->last_pts + 3003;
     if (f->pts != AV_NOPTS_VALUE) v->last_pts = f->pts;
     bool interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+    double fps = v->ctx->framerate.num > 0 && v->ctx->framerate.den > 0 ? av_q2d(v->ctx->framerate) : 0;
+    v->out_fps = fps;
     if (d->opt.deinterlace && interlaced && f->format == AV_PIX_FMT_YUV420P) {
         if (!v->graph || f->width != v->g_w || f->height != v->g_h || f->format != v->g_fmt) v_build_graph(v, f);
         if (v->graph && av_buffersrc_add_frame_flags(v->bsrc, f, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0) {
+            v->out_fps = fps * 2;
             AVRational tb = av_buffersink_get_time_base(v->bsink);
             while (av_buffersink_get_frame(v->bsink, v->filt) >= 0) {
                 if (v->filt->pts != AV_NOPTS_VALUE) v->filt->pts = av_rescale_q(v->filt->pts, tb, (AVRational){1, 90000});
@@ -431,10 +494,17 @@ static void v_decode(dp_dvd *d, vstate *v, const uint8_t *data, int size, int64_
             v->pkt->size = out_size;
             v->pkt->pts = v->parser->pts;
             v->pkt->dts = v->parser->dts;
+            /* 统计解码耗时（不含等待显示） */
+            int64_t t0 = dp_now_us();
             if (avcodec_send_packet(v->ctx, v->pkt) < 0) continue;
-            while (avcodec_receive_frame(v->ctx, v->frame) >= 0) {
+            for (;;) {
+                int r = avcodec_receive_frame(v->ctx, v->frame);
+                int64_t took = dp_now_us() - t0;
+                if (took > v->st_decode_max_us) v->st_decode_max_us = took;
+                if (r < 0) break;
                 v_output(d, v, v->frame, false);
                 av_frame_unref(v->frame);
+                t0 = dp_now_us();
             }
         }
         return;
@@ -463,6 +533,7 @@ static void *video_thread(void *arg) {
     v.ctx = avcodec_alloc_context3(v.codec);
     v.ctx->pkt_timebase = (AVRational){1, 90000};
     v.ctx->thread_count = 2;
+    dp_thread_priority(-4, "视频");
     if (avcodec_open2(v.ctx, v.codec, NULL) < 0) {
         emit(d, DP_EV_ERROR, 0, 0, "MPEG-2 解码器打不开");
         return NULL;
@@ -652,6 +723,7 @@ static void *audio_thread(void *arg) {
     dp_dvd *d = arg;
     astate a = {0};
     a.stream = -1;
+    dp_thread_priority(-16, "音频");
     a.pkt = av_packet_alloc();
     a.frame = av_frame_alloc();
     while (!d->quit) {
@@ -988,6 +1060,7 @@ static void wait_drained(dp_dvd *d, int max_ms) {
 static void *nav_thread(void *arg) {
     dp_dvd *d = arg;
     uint8_t buf[DVD_VIDEO_LB_LEN];
+    dp_thread_priority(-2, "导航");
     int64_t last_state_us = 0;
     /* 直接播放某个标题：dvdnav 的虚拟机在第一次取块时才启动（会从首播开始），所以等它启动后再跳 */
     bool start_pending = d->opt.start_title > 0;

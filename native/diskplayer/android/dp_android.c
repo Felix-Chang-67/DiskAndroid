@@ -3,6 +3,8 @@
  * 播放核心（dp_dvd.c 等）与平台无关，在电脑上有单元测试。
  */
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <dlfcn.h>
 #include <GLES3/gl3.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -91,6 +93,8 @@ typedef struct {
     uint8_t *ov_pm;               /* 叠加层的预乘 alpha 副本（线性过滤时字幕边缘不发黑） */
     size_t ov_pm_size;
     bool egl_failed;              /* 这个窗口上 EGL 建不起来：等换了窗口再试，不要每帧重试刷日志 */
+    PFNEGLPRESENTATIONTIMEANDROIDPROC present_time;   /* EGL_ANDROID_presentation_time，没有为 NULL */
+    float win_fps;                /* 已经告诉系统的帧率（换窗口后要重新告诉） */
     int surf_w, surf_h;
     /* 最近一帧的显示比例（给界面把触摸点换算成视频坐标） */
     volatile int disp_w, disp_h, frame_w, frame_h;
@@ -101,6 +105,7 @@ typedef struct {
     int aa_rate, aa_channels;
     int64_t aa_base;              /* 上次清空时已写入的帧数（之后"已播放"从这里算起） */
     bool aa_paused;
+    int64_t aa_xruns_closed;      /* 已关闭的旧流上的欠载次数（输出设备变了会换流） */
 } jplayer;
 
 /* 读盘回调（在导航线程里）：调 Kotlin 的 SectorReader.read。 */
@@ -192,6 +197,7 @@ static void gl_check_window(jplayer *p) {
         p->cur_window = p->window;
         if (p->cur_window) ANativeWindow_acquire(p->cur_window);
         p->egl_failed = false;
+        p->win_fps = 0;
         pthread_cond_broadcast(&p->win_cond);
     }
     pthread_mutex_unlock(&p->win_lock);
@@ -233,6 +239,9 @@ static bool gl_ensure(jplayer *p) {
         return false;
     }
     eglSwapInterval(p->egl_dpy, 1);
+    const char *ext = eglQueryString(p->egl_dpy, EGL_EXTENSIONS);
+    p->present_time = ext && strstr(ext, "EGL_ANDROID_presentation_time")
+                          ? (PFNEGLPRESENTATIONTIMEANDROIDPROC)eglGetProcAddress("eglPresentationTimeANDROID") : NULL;
     GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, FS);
     p->prog = glCreateProgram();
     glAttachShader(p->prog, vs);
@@ -267,7 +276,8 @@ static bool gl_ensure(jplayer *p) {
     glGenBuffers(1, &p->vbo);
     eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_WIDTH, &p->surf_w);
     eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_HEIGHT, &p->surf_h);
-    dp_log(DP_LOG_INFO, "VIDEO", "视频输出就绪：%d×%d（OpenGL ES 3）", p->surf_w, p->surf_h);
+    dp_log(DP_LOG_INFO, "VIDEO", "视频输出就绪：%d×%d（OpenGL ES 3，%s）", p->surf_w, p->surf_h,
+           p->present_time ? "按时刻提交" : "不支持按时刻提交");
     return true;
 }
 
@@ -286,9 +296,34 @@ static void upload_plane(jplayer *p, int i, const uint8_t *data, int stride, int
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 }
 
+/*
+ * 告诉系统视频的帧率（Android 11+）：系统据此挑能整除的屏幕刷新率（29.97 帧 → 60 / 120 Hz），
+ * 避免在 144 Hz 屏上每帧停 4 或 5 个刷新周期造成的顿挫，也避免播放中刷新率自己变来变去。
+ */
+typedef int32_t (*set_frame_rate_fn)(ANativeWindow *, float, int8_t);
+static void hint_frame_rate(jplayer *p, double fps) {
+    if (fps <= 0 || !p->cur_window || (float)fps == p->win_fps) return;
+    static set_frame_rate_fn fn;
+    static bool looked;
+    if (!looked) {
+        looked = true;
+        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!lib) lib = dlopen("libandroid.so", RTLD_NOW);
+        if (lib) fn = (set_frame_rate_fn)dlsym(lib, "ANativeWindow_setFrameRate");
+    }
+    p->win_fps = (float)fps;
+    if (!fn) {
+        dp_log(DP_LOG_INFO, "VIDEO", "系统不支持指定帧率（Android 11 起才有）");
+        return;
+    }
+    int32_t r = fn(p->cur_window, (float)fps, 1 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE */);
+    dp_log(DP_LOG_INFO, "VIDEO", "告诉系统视频帧率 %.3f%s", fps, r == 0 ? "" : "（失败）");
+}
+
 static void video_present(void *opaque, const dp_frame *f, const uint32_t *overlay, bool changed) {
     jplayer *p = opaque;
     if (!gl_ensure(p)) return;
+    hint_frame_rate(p, f->fps);
     EGLint sw = 0, sh = 0;
     eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_WIDTH, &sw);
     eglQuerySurface(p->egl_dpy, p->egl_surf, EGL_HEIGHT, &sh);
@@ -358,6 +393,7 @@ static void video_present(void *opaque, const dp_frame *f, const uint32_t *overl
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (p->present_time && f->present_ns > 0) p->present_time(p->egl_dpy, p->egl_surf, (EGLnsecsANDROID)f->present_ns);
     if (!eglSwapBuffers(p->egl_dpy, p->egl_surf)) {
         EGLint e = eglGetError();
         if (e == EGL_BAD_SURFACE || e == EGL_BAD_NATIVE_WINDOW) gl_teardown(p);
@@ -398,8 +434,11 @@ static AAudioStream *aa_create(int rate, int channels) {
         dp_log(DP_LOG_ERROR, "VIDEO", "AAudio 打不开：%s", AAudio_convertResultToText(r));
         return NULL;
     }
-    dp_log(DP_LOG_INFO, "VIDEO", "音频输出：%d Hz %d 声道，缓冲 %d 帧", AAudioStream_getSampleRate(st), AAudioStream_getChannelCount(st),
-           AAudioStream_getBufferSizeInFrames(st));
+    /* 缓冲开到最大：画面跟着声音走，延迟大一点没关系，不容易因为线程一时没排上而断音 */
+    int32_t cap = AAudioStream_getBufferCapacityInFrames(st);
+    if (cap > 0) AAudioStream_setBufferSizeInFrames(st, cap);
+    dp_log(DP_LOG_INFO, "VIDEO", "音频输出：%d Hz %d 声道，缓冲 %d 帧（最大 %d）", AAudioStream_getSampleRate(st), AAudioStream_getChannelCount(st),
+           AAudioStream_getBufferSizeInFrames(st), cap);
     return st;
 }
 
@@ -431,6 +470,8 @@ static int audio_write(void *opaque, const int16_t *pcm, int frames) {
         AAudioStream *old = p->aa;
         /* 旧流上已经播放的帧接着算，时钟不跳 */
         int64_t old_written = AAudioStream_getFramesWritten(old);
+        int32_t old_xruns = AAudioStream_getXRunCount(old);
+        if (old_xruns > 0) p->aa_xruns_closed += old_xruns;
         p->aa = st;
         p->aa_base -= old_written;
         if (st && !p->aa_paused) AAudioStream_requestStart(st);
@@ -469,6 +510,19 @@ static int64_t audio_played(void *opaque) {
     played -= p->aa_base;
     pthread_mutex_unlock(&p->aa_lock);
     return played < 0 ? 0 : played;
+}
+
+/* 音频欠载累计次数（统计）。 */
+static int64_t audio_xruns(void *opaque) {
+    jplayer *p = opaque;
+    pthread_mutex_lock(&p->aa_lock);
+    int64_t n = p->aa_xruns_closed;
+    if (p->aa) {
+        int32_t x = AAudioStream_getXRunCount(p->aa);
+        if (x > 0) n += x;
+    }
+    pthread_mutex_unlock(&p->aa_lock);
+    return n;
 }
 
 /* 导航线程（用户暂停 / 继续）。 */
@@ -539,7 +593,8 @@ JNIEXPORT jlong JNICALL JFN(nativeOpenDvd)(JNIEnv *env, jclass cls, jobject read
     dp_platform pf = {
         .opaque = p, .video_present = video_present, .video_idle = video_idle, .video_exit = video_exit,
         .audio_open = audio_open, .audio_write = audio_write,
-        .audio_played = audio_played, .audio_pause = audio_pause, .audio_flush = audio_flush, .audio_close = audio_close,
+        .audio_played = audio_played, .audio_xruns = audio_xruns, .audio_pause = audio_pause, .audio_flush = audio_flush,
+        .audio_close = audio_close,
         .on_event = event_cb, .realtime = true,
     };
     dp_dvd_options opt;

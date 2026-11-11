@@ -22,6 +22,8 @@ void dp_log(dp_log_level level, const char *tag, const char *fmt, ...) __attribu
 
 int64_t dp_now_us(void);
 void dp_sleep_us(int64_t us);
+/* 调整当前线程的优先级（nice 值，越小越优先：音频 -16、画面 -4）；失败只记日志。 */
+void dp_thread_priority(int nice, const char *name);
 
 /* ---------------- 包队列 ---------------- */
 
@@ -84,6 +86,7 @@ typedef struct {
     pthread_mutex_t lock;
     /* 统计 */
     uint64_t upcalls, bytes_read, errors;
+    uint64_t read_us, read_max_us;   /* 等光驱的总时间、最长一次（统计用） */
 } dp_source;
 
 dp_source *dp_source_new(dp_read_fn read, void *opaque, uint64_t size, int prefetch_bytes);
@@ -102,6 +105,8 @@ typedef struct {
     int64_t pts;                /* 90 kHz，连续时间轴 */
     const uint8_t *plane[3];    /* YUV420P */
     int stride[3];
+    double fps;                 /* 输出帧率（去隔行后每场一帧时是两倍），0 = 不知道；给系统挑合适的屏幕刷新率 */
+    int64_t present_ns;         /* 希望显示出来的时刻（CLOCK_MONOTONIC，纳秒），0 = 尽快 */
 } dp_frame;
 
 typedef struct dp_platform {
@@ -115,6 +120,8 @@ typedef struct dp_platform {
     int (*audio_open)(void *opaque, int sample_rate, int channels);
     int (*audio_write)(void *opaque, const int16_t *pcm, int frames);
     int64_t (*audio_played)(void *opaque);
+    /* 音频输出欠载（缓冲放空）累计次数，统计用，可以为 NULL。 */
+    int64_t (*audio_xruns)(void *opaque);
     void (*audio_pause)(void *opaque, bool pause);
     void (*audio_flush)(void *opaque);
     void (*audio_close)(void *opaque);

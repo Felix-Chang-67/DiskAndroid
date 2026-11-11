@@ -1,6 +1,9 @@
+#define _GNU_SOURCE
 #include "dp_core.h"
 
 #include <errno.h>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +37,12 @@ int64_t dp_now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+void dp_thread_priority(int nice, const char *name) {
+    if (setpriority(PRIO_PROCESS, (id_t)gettid(), nice) != 0) {
+        dp_log(DP_LOG_DEBUG, "DVD", "%s线程优先级设不了（%d）：%s", name, nice, strerror(errno));
+    }
 }
 
 void dp_sleep_us(int64_t us) {
@@ -196,7 +205,11 @@ static void fill_cache(dp_source *s, uint64_t off) {
     s->cache_len = 0;
     if (len <= 0) return;
     s->upcalls++;
+    int64_t t0 = dp_now_us();
     int n = s->read(s->opaque, off, s->cache, len);
+    uint64_t took = (uint64_t)(dp_now_us() - t0);
+    s->read_us += took;
+    if (took > s->read_max_us) s->read_max_us = took;
     if (n == len) {
         s->cache_len = len;
         s->bytes_read += (uint64_t)n;
