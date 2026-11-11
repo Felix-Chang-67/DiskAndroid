@@ -62,6 +62,7 @@ struct dp_bd {
 
     /* ---- 只在导航线程里用 ---- */
     bool nav_mode;            /* 导航模式（光盘程序在控制） */
+    int bee;                  /* 内容证书里的总线加密标志：1 开、0 关、-1 不明 */
     bool still;
     int64_t still_until_us;   /* 定时静止到什么时候，0 = 一直等按键 */
     bool ended, paused;
@@ -669,6 +670,8 @@ static void handle_event(dp_bd *d, const BD_EVENT *ev) {
         case BD_EVENT_ENCRYPTED: {
             /* 打开时 AACS 已经"成功"，播放时读到的还是密文：密钥不对，或者光驱开了总线加密 */
             const char *m = ev->param == BD_ERROR_BDPLUS ? "这张盘有 BD+ 保护（本 App 不支持 BD+）"
+                            : (d->st.aacs && d->bee == 1)
+                                ? "这张盘的视频确实被总线加密了：只有 VUK / 单元密钥不够，必须和光驱认证拿到总线密钥才能解（公开证书已被光驱吊销）"
                             : d->st.aacs ? "AACS 解密不对：读到的视频还是加密的（KEYDB.cfg 里这张盘的密钥可能不对）"
                                          : "该盘有版权保护，需要启用解密组件（AACS）";
             dp_log(DP_LOG_ERROR, TAG, "%s", m);
@@ -1013,34 +1016,34 @@ static void bd_log(const char *msg) {
  */
 static void aacs_error_text(const BLURAY_DISC_INFO *di, int bee, char *out, int len) {
     int mkbv = di->aacs_mkbv;
-    if (di->aacs_error_code == -5 || di->aacs_error_code == -7) {
-        /* 光驱拒绝了认证。为什么非要认证：总线加密（那就怎么都绕不过去），或者 KEYDB 里没有这张盘的密钥 */
-        if (bee == 1) {
-            snprintf(out, (size_t)len,
-                     "该光驱不支持此盘的认证：这张盘开了总线加密，播放时必须先和光驱认证，而光驱拒绝了 KEYDB.cfg 里的主机证书"
-                     "（已被吊销）。用公开的 KEYDB.cfg 播不了这张盘，KEYDB 里有它的密钥也不行");
-        } else {
-            snprintf(out, (size_t)len,
-                     "该光驱不支持此盘的认证：KEYDB.cfg 里没有这张盘的密钥（VUK），只能向光驱读卷标识，而光驱拒绝了 KEYDB.cfg 里的主机证书"
-                     "（已被吊销）。KEYDB.cfg 以后收录了这张盘就能播");
-        }
-        return;
-    }
+    const char *bus = bee == 1
+        ? "；这张盘还开了总线加密，在支持总线加密的光驱上，即使补上 VUK 也要认证后才能解总线层"
+        : "";
     switch (di->aacs_error_code) {
         case -1: snprintf(out, (size_t)len, "读不出盘上的 AACS 文件（AACS 目录损坏或读盘出错）"); break;
         case -2: snprintf(out, (size_t)len, "找不到 KEYDB.cfg 密钥库（请在\"解密组件\"里导入）"); break;
         case -3:
-            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK），也没有能处理这张盘（MKB 版本 %d）的处理密钥", mkbv);
+            /* 连媒体密钥都算不出：KEYDB 的处理密钥覆盖不到这么新的 MKB，也没有这张盘的 VUK 条目。不是证书问题 */
+            snprintf(out, (size_t)len,
+                     "KEYDB.cfg 里没有这张盘的 VUK 条目，它的处理密钥也覆盖不到 MKB 版本 %d（盘比 KEYDB 新）。"
+                     "需要一个含这张盘 VUK 的 KEYDB.cfg", mkbv);
+            break;
+        case -8:
+            snprintf(out, (size_t)len,
+                     "KEYDB.cfg 里没有这张盘的 VUK 条目，设备密钥也覆盖不到 MKB 版本 %d。需要一个含这张盘 VUK 的 KEYDB.cfg", mkbv);
+            break;
+        case -5:
+        case -7:
+            /* 算出了媒体密钥，但缺这张盘的 VUK/卷标识，要向光驱认证读取，光驱拒绝了证书 */
+            snprintf(out, (size_t)len,
+                     "KEYDB.cfg 里没有这张盘的 VUK / 卷标识（MKB 版本 %d 的媒体密钥算出来了，只差这一步），"
+                     "只能向光驱认证读取，而光驱拒绝了 KEYDB.cfg 里的主机证书。补上这张盘的 VUK 就不用认证%s", mkbv, bus);
             break;
         case -4:
-            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK）；要向光驱读卷标识，但 KEYDB.cfg 里没有可用的主机证书");
+            snprintf(out, (size_t)len,
+                     "KEYDB.cfg 里没有这张盘的 VUK / 卷标识，也没有可用的主机证书向光驱认证。需要一个含这张盘 VUK 的 KEYDB.cfg%s", bus);
             break;
-        case -5: snprintf(out, (size_t)len, "该光驱不支持此盘的认证：光驱拒绝了 KEYDB.cfg 里的主机证书（可能已被吊销）"); break;
-        case -6: snprintf(out, (size_t)len, "该光驱不支持此盘的认证：光驱没有报告 AACS 功能"); break;
-        case -7: snprintf(out, (size_t)len, "该光驱不支持此盘的认证（AACS 认证过程出错）"); break;
-        case -8:
-            snprintf(out, (size_t)len, "KEYDB.cfg 里没有这张盘的密钥（VUK），也没有能处理这张盘（MKB 版本 %d）的设备密钥", mkbv);
-            break;
+        case -6: snprintf(out, (size_t)len, "该光驱没有报告 AACS 功能（认证读不了这张盘的密钥）"); break;
         case -10: snprintf(out, (size_t)len, "不支持 AACS 2.0（4K UHD 蓝光）"); break;
         default: snprintf(out, (size_t)len, "AACS 解密失败（错误码 %d）", di->aacs_error_code); break;
     }
@@ -1117,6 +1120,7 @@ dp_bd *dp_bd_open(dp_source *src, const dp_platform *pf, const dp_bd_options *op
     d->st.aacs = di->aacs_detected;
     int indx = index_version(d->bd);
     int bee = di->aacs_detected ? bus_encryption_flag(d->bd) : -1;
+    d->bee = bee;
     if (di->aacs_detected) {
         char id[41];
         for (int i = 0; i < 20; i++) snprintf(id + 2 * i, 3, "%02x", di->disc_id[i]);

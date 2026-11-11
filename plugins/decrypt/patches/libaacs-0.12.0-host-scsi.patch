@@ -345,6 +345,39 @@
          X_FREE(*pp);
      }
  }
+--- a/src/libaacs/aacs.c
++++ b/src/libaacs/aacs.c
+@@ -1382,12 +1382,30 @@
+         error_code = _read_read_data_key(aacs, cf->host_cert_list);
+         if (error_code != AACS_SUCCESS) {
+             BD_DEBUG(DBG_AACS | DBG_CRIT, "Unable to initialize bus encryption required by drive and disc\n");
++            /*
++             * DiskAndroid: the Read Data Key needs an authenticated drive session, which failed.
++             * We do have CPS unit keys though, and the Bus Encryption Enabled flag in the content
++             * certificate does NOT guarantee that the actual video sectors are bus-encrypted. Rather
++             * than refuse the whole disc, disable the bus layer (bec = 0 makes _decrypt_unit_bus a
++             * no-op) and let unit-key decryption + the TS sync check in aacs_decrypt_unit decide per
++             * unit during playback. Genuinely bus-encrypted content then surfaces as undecryptable
++             * units (the player reports it); content that only set the flag plays with the unit key.
++             */
++            BD_DEBUG(DBG_AACS | DBG_CRIT, "DiskAndroid: no bus key; trying unit-only decryption (BEE flag may be advisory)\n");
++            aacs->bec = 0;
++            error_code = AACS_SUCCESS;
+             }
+         }
+     }
+ 
+     keydbcfg_config_file_close(cf);
+ 
++    /* DiskAndroid: one-line classification for the app log (no key material, safe to forward). */
++    BD_DEBUG(DBG_AACS | DBG_CRIT,
++             "DiskAndroid AACS summary: mkbv=%d bee=%d bec=%d unit_keys=%u result=%d\n",
++             aacs->mkb_version, aacs->bee, aacs->bec,
++             aacs->uk ? aacs->uk->num_uk : 0u, error_code);
++
+     BD_DEBUG(DBG_AACS, "AACS initialized!\n");
+ 
+     return error_code;
 --- a/src/libaacs/aacs.h
 +++ b/src/libaacs/aacs.h
 @@ -111,6 +111,14 @@

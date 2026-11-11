@@ -213,13 +213,16 @@ class VideoPlaybackController(
         val driveBec = session.info.value?.features?.aacs?.busEncryption
         val bee = a.busEncryption == true
         val facts = "AACS：盘 ID ${a.discId?.let { it.take(8) + "…" } ?: "读不出"}，MKB 版本 ${a.mkbVersion ?: "?"}，总线加密" +
-            (if (bee) "开" else "关") + "；KEYDB.cfg 里" + when (inKeydb) { true -> "有"; false -> "没有"; null -> "（没查到）" } + "这张盘的密钥"
-        val (verdict, bad) = when {
-            bee && driveBec != false ->
-                "这张盘开了总线加密（这台光驱也支持），播放时必须先和光驱认证，而公开的主机证书已被新盘吊销：" +
-                    "用公开的 KEYDB.cfg 多半播不了，KEYDB 里有它的密钥也一样" to true
-            inKeydb == true -> "可以直接解密播放，不用和光驱认证" to false
-            else -> "要和光驱认证读卷标识，公开的主机证书多半已被吊销，大概率打不开" to true
+            (if (bee) "开" else "关") + "；KEYDB.cfg 里" + when (inKeydb) { true -> "有"; false -> "没有"; null -> "没查" } + "这张盘的 VUK 条目"
+        val busNote = if (bee && driveBec != false) "；这张盘开了总线加密，若视频确实被总线加密，只有 VUK 还不够，要和光驱认证" else ""
+        val (verdict, bad) = when (inKeydb) {
+            true -> if (bee && driveBec != false)
+                "KEYDB 里有这张盘的密钥。它开了总线加密，播放时先按只解单元层试；若视频确实被总线加密则还需认证$busNote" to false
+            else "KEYDB 里有这张盘的密钥，应该能直接解密播放" to false
+            // 不在 KEYDB：别先下"缺证书"的结论。能不能靠处理密钥算出密钥、要不要认证，点播放时按实际结果分类
+            false -> "你的 KEYDB.cfg 里没有这张盘（这种库常常 0 个光盘条目）。能不能播要看 KEYDB 的处理密钥覆不覆盖这张盘" +
+                "、以及视频是否真被总线加密——点播放会实际尝试，日志里按“算不出密钥 / 要认证 / 真被总线加密”分类$busNote" to true
+            null -> "还没导入 KEYDB.cfg，或查不到" to true
         }
         val text = "$facts。$verdict。"
         if (a.discId == null || aacsVerdictsLogged.add(a.discId!!)) {

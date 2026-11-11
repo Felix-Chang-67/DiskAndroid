@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/cache2", tmp);
     setenv("XDG_CACHE_HOME", path, 1);
     bd = open_iso(iso, &h, &src, err, sizeof(err));
-    CHECK(bd == NULL && strstr(err, "KEYDB.cfg 里没有这张盘的密钥") && strstr(err, "77"), "KEYDB 里没有这张盘：%s", err[0] ? err : "（居然打开了）");
+    CHECK(bd == NULL && strstr(err, "没有这张盘的 VUK 条目") && strstr(err, "77"), "KEYDB 里没有这张盘：%s", err[0] ? err : "（居然打开了）");
     close_iso(bd, &h, src);
 
     /* ---- 4：4K UHD ---- */

@@ -9,7 +9,7 @@
 ## 文档
 
 - 开发计划、风险、测试节点：[`docs/PLAN.md`](docs/PLAN.md)
-- 当前测试节点说明：[`docs/testing/N3b.md`](docs/testing/N3b.md)（历史：[`N3`](docs/testing/N3.md)、[`N1.1`](docs/testing/N1.1.md)、[`N1.2`](docs/testing/N1.2.md)、[`N1.3`](docs/testing/N1.3.md)、[`N1.5`](docs/testing/N1.5.md)、[`N1.5b`](docs/testing/N1.5b.md)、[`N1.6`](docs/testing/N1.6.md)、[`N2.1`](docs/testing/N2.1.md)、[`N2.2`](docs/testing/N2.2.md)、[`N2.3`](docs/testing/N2.3.md)）
+- 当前测试节点说明：[`docs/testing/N3c.md`](docs/testing/N3c.md)（历史：[`N3`](docs/testing/N3.md)、[`N3b`](docs/testing/N3b.md)、[`N1.1`](docs/testing/N1.1.md)、[`N1.2`](docs/testing/N1.2.md)、[`N1.3`](docs/testing/N1.3.md)、[`N1.5`](docs/testing/N1.5.md)、[`N1.5b`](docs/testing/N1.5b.md)、[`N1.6`](docs/testing/N1.6.md)、[`N2.1`](docs/testing/N2.1.md)、[`N2.2`](docs/testing/N2.2.md)、[`N2.3`](docs/testing/N2.3.md)）
 - 解密组件（阶段 3，不进 APK）：[`plugins/decrypt/README.md`](plugins/decrypt/README.md)
 
 ## 模块
