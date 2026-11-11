@@ -104,6 +104,8 @@ class DiscPlayer private constructor(private var handle: Long) : AutoCloseable {
         val videoCodec: String = "",
         val audioCodec: String = "",
         val error: String = "",
+        /** 视频实际的显示帧率（去隔行后；软下拉的电影是 23.976），0 = 还不知道。界面据此挑屏幕刷新率。 */
+        val videoFps: Double = 0.0,
     ) {
         /** 正在菜单里（有可以选的按钮 / 蓝光的交互菜单显示中）。 */
         val inMenu: Boolean get() = buttons > 0
@@ -158,7 +160,7 @@ class DiscPlayer private constructor(private var handle: Long) : AutoCloseable {
         const val EV_ERROR = 5
         const val EV_FIRST_FRAME = 6
 
-        private const val INTS = 33
+        private const val INTS = 34
         private const val LONGS = 7
 
         /**
@@ -239,6 +241,7 @@ class DiscPlayer private constructor(private var handle: Long) : AutoCloseable {
                 bdj = ints[30] != 0,
                 planeWidth = ints[31],
                 planeHeight = ints[32],
+                videoFps = ints.getOrElse(33) { 0 } / 1000.0,
                 videoCodec = extra.getOrElse(0) { "" },
                 audioCodec = extra.getOrElse(1) { "" },
                 error = extra.getOrElse(2) { "" },

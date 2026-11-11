@@ -30,6 +30,7 @@ typedef struct {
     int video_w, video_h;
     int64_t clock_pts;
     int video_codec, audio_codec;   /* 正在用的解码器（AVCodecID），0 = 还没有 */
+    double video_fps;               /* 视频实际的显示帧率（去隔行后的；软下拉的电影是 23.976），0 = 还不知道 */
 } dp_av_stats;
 
 dp_av *dp_av_new(const dp_platform *pf, const dp_av_options *opt);

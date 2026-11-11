@@ -247,6 +247,9 @@ if aacs_keydb:
     cci[0:2] = u16(1)
     cci[16:22] = u16(0x0111) + u16(0x0100) + u16(0)                    # 增强标题使用规则：表示加密
     write("AACS/CPSUnit00001.cci", bytes(cci))
+    # 内容证书：AACS 1（类型 00h），第 2 字节最高位 = 总线加密。签名是假的，libaacs 验不过就当没有证书（不影响解密），
+    # 播放器自己读这个标志写进日志、用在提示里
+    write("AACS/Content000.cer", bytes([0x00, 0x80]) + bytes(24) + bytes(40))
     # 最小的 MKB（libaacs 0.12.0 mkb.c 的记录格式：类型 1 字节 + 长度 3 字节（含头）+ 数据）：类型和版本（MKB 类型 3，版本 77）、
     # 媒体密钥校验数据、一个 UV、一个 cvalue，最后 4 个 0 字节结束。KEYDB 里没有这张盘的 VUK、也没有处理密钥时，libaacs 报"没有处理密钥"
     def rec(t, body):

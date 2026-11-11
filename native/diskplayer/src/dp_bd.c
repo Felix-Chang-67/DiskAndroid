@@ -1011,8 +1011,21 @@ static void bd_log(const char *msg) {
  * -5 证书被吊销、-6 打不开光驱（光驱不支持 AACS）、-7 光驱认证出错、-8 没有设备密钥、-10 不支持的 AACS 版本）。
  * 光驱那边的失败（-5 / -6 / -7）都说"该光驱不支持此盘的认证"，sense 原文由 App 的命令日志记录。
  */
-static void aacs_error_text(const BLURAY_DISC_INFO *di, char *out, int len) {
+static void aacs_error_text(const BLURAY_DISC_INFO *di, int bee, char *out, int len) {
     int mkbv = di->aacs_mkbv;
+    if (di->aacs_error_code == -5 || di->aacs_error_code == -7) {
+        /* 光驱拒绝了认证。为什么非要认证：总线加密（那就怎么都绕不过去），或者 KEYDB 里没有这张盘的密钥 */
+        if (bee == 1) {
+            snprintf(out, (size_t)len,
+                     "该光驱不支持此盘的认证：这张盘开了总线加密，播放时必须先和光驱认证，而光驱拒绝了 KEYDB.cfg 里的主机证书"
+                     "（已被吊销）。用公开的 KEYDB.cfg 播不了这张盘，KEYDB 里有它的密钥也不行");
+        } else {
+            snprintf(out, (size_t)len,
+                     "该光驱不支持此盘的认证：KEYDB.cfg 里没有这张盘的密钥（VUK），只能向光驱读卷标识，而光驱拒绝了 KEYDB.cfg 里的主机证书"
+                     "（已被吊销）。KEYDB.cfg 以后收录了这张盘就能播");
+        }
+        return;
+    }
     switch (di->aacs_error_code) {
         case -1: snprintf(out, (size_t)len, "读不出盘上的 AACS 文件（AACS 目录损坏或读盘出错）"); break;
         case -2: snprintf(out, (size_t)len, "找不到 KEYDB.cfg 密钥库（请在\"解密组件\"里导入）"); break;
@@ -1031,6 +1044,25 @@ static void aacs_error_text(const BLURAY_DISC_INFO *di, char *out, int len) {
         case -10: snprintf(out, (size_t)len, "不支持 AACS 2.0（4K UHD 蓝光）"); break;
         default: snprintf(out, (size_t)len, "AACS 解密失败（错误码 %d）", di->aacs_error_code); break;
     }
+}
+
+/*
+ * 盘上 AACS 内容证书（AACS/Content000.cer，不加密）的"总线加密"标志：第 2 字节最高位（libaacs content_cert.c 同样这么读）。
+ * 开了总线加密、光驱又支持时，光驱送出来的数据还要再解一层，密钥只能通过和光驱认证拿到。返回 1 / 0，读不出 -1。
+ */
+static int bus_encryption_flag(BLURAY *bd) {
+    static const char *const names[] = {"AACS/Content000.cer", "AACS/Content001.cer"};
+    for (int i = 0; i < 2; i++) {
+        void *data = NULL;
+        int64_t size = 0;
+        if (bd_read_file(bd, names[i], &data, &size) && data && size >= 26) {
+            int bee = ((const uint8_t *)data)[1] >> 7;
+            free(data);
+            return bee;
+        }
+        free(data);
+    }
+    return -1;
 }
 
 /* index.bdmv 的版本：0300 = Ultra HD Blu-ray（用 AACS 2.0）。读不出返回 0。 */
@@ -1084,9 +1116,13 @@ dp_bd *dp_bd_open(dp_source *src, const dp_platform *pf, const dp_bd_options *op
     }
     d->st.aacs = di->aacs_detected;
     int indx = index_version(d->bd);
+    int bee = di->aacs_detected ? bus_encryption_flag(d->bd) : -1;
     if (di->aacs_detected) {
-        dp_log(DP_LOG_INFO, TAG, "AACS：解密组件%s，MKB 版本 %d，index.bdmv 版本 %04d，结果 %d", di->libaacs_detected ? "已加载" : "没有加载",
-               di->aacs_mkbv, indx, di->aacs_error_code);
+        char id[41];
+        for (int i = 0; i < 20; i++) snprintf(id + 2 * i, 3, "%02x", di->disc_id[i]);
+        dp_log(DP_LOG_INFO, TAG, "AACS：解密组件%s，盘 ID %s，MKB 版本 %d，总线加密 %s，index.bdmv 版本 %04d，结果 %d",
+               di->libaacs_detected ? "已加载" : "没有加载", id, di->aacs_mkbv, bee == 1 ? "开" : bee == 0 ? "关" : "不明", indx,
+               di->aacs_error_code);
     }
     if (di->aacs_detected && indx >= 300) {
         /* Ultra HD Blu-ray：AACS 2.0，不支持（即使 KEYDB 里有密钥也不试） */
@@ -1097,7 +1133,7 @@ dp_bd *dp_bd_open(dp_source *src, const dp_platform *pf, const dp_bd_options *op
     }
     if (di->aacs_detected && !di->aacs_handled) {
         if (!di->libaacs_detected) snprintf(err, (size_t)errlen, "该盘有版权保护，需要启用解密组件（AACS）");
-        else aacs_error_text(di, err, errlen);
+        else aacs_error_text(di, bee, err, errlen);
         dp_log(DP_LOG_WARN, TAG, "%s（libaacs 错误码 %d）", err, di->aacs_error_code);
         dp_bd_close(d);
         return NULL;
@@ -1181,6 +1217,7 @@ void dp_bd_get_state(dp_bd *d, dp_bd_state *out) {
     out->video_h = as.video_h;
     out->video_codec_id = as.video_codec;
     out->audio_codec_id = as.audio_codec;
+    out->video_fps = as.video_fps;
 }
 
 void dp_bd_refresh(dp_bd *d) {

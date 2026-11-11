@@ -47,6 +47,7 @@ typedef struct {
     bool aacs;                         /* 有 AACS 加密 */
     uint64_t bytes_read, read_errors, frames_shown, frames_dropped, audio_frames;
     int video_codec_id, audio_codec_id;  /* 正在用的解码器（FFmpeg AVCodecID） */
+    double video_fps;                    /* 视频实际的显示帧率，0 = 还不知道（界面据此挑屏幕刷新率） */
     char error[160];
 } dp_bd_state;
 

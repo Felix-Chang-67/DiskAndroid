@@ -287,6 +287,29 @@ int main(int argc, char **argv) {
     dp_source_free(src);
     fclose(f);
 
+    /* ======== 第 3 轮：只有 LPCM、光盘程序不选音轨（音轨寄存器一直是 15）：从菜单进标题 1，要有声音 ======== */
+    if (argc > 2) {
+        memset(&h, 0, sizeof(h));
+        pthread_mutex_init(&h.lock, NULL);
+        g_saw_lpcm = g_saw_ac3 = false;
+        d = open_disc(argv[2], &h, &f, &src, "ja", 0);
+        dp_dvd_start(d);
+        CHECK(wait_for(d, 20000, in_menu_still, NULL, &s), "LPCM 盘：停在菜单");
+        dp_dvd_command(d, DP_CMD_MOUSE_ACTIVATE, 200, 130);
+        dp_sleep_us(300000);
+        CHECK(wait_for(d, 20000, in_menu_still, NULL, &s), "LPCM 盘：标题 1 播完回菜单");
+        settle(&h);
+        pthread_mutex_lock(&h.lock);
+        CHECK(h.titles_played[1], "LPCM 盘：播了标题 1");
+        CHECK(h.title_audio_codes[1] == 0xA0, "LPCM 盘：标题 1 按 LPCM 解码（流 %02Xh；以前当成 AC-3，没有声音）", h.title_audio_codes[1]);
+        CHECK(h.audio_frames > 48000 * 4, "LPCM 盘：解出了声音（%llu 帧）", (unsigned long long)h.audio_frames);
+        pthread_mutex_unlock(&h.lock);
+        CHECK(g_saw_lpcm, "LPCM 盘：用的是 pcm_dvd 解码器");
+        dp_dvd_close(d);
+        dp_source_free(src);
+        fclose(f);
+    }
+
     fprintf(stderr, failures ? "\n%d 项失败\n" : "\n全部通过\n", failures);
     return failures ? 1 : 0;
 }

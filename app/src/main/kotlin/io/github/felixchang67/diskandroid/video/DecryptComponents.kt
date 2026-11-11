@@ -147,6 +147,52 @@ class DecryptComponents(private val app: Application, private val log: DiskLog) 
         }
     }
 
+    private val keydbHits = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * KEYDB.cfg 里有没有这张盘（按盘 ID 找：KEYDB 的光盘条目是"0x<盘 ID> = 片名 | …"，十六进制大小写不一定）。
+     * 文件有几十 MB，逐块扫一遍要一两秒；结果按"KEYDB 的 SHA-256 + 盘 ID"记住。没导入 KEYDB 返回 null。
+     */
+    suspend fun keydbHas(discId: String): Boolean? = withContext(Dispatchers.IO) {
+        val item = _items.value[Kind.KEYDB] ?: return@withContext null
+        val id = discId.lowercase()
+        val key = item.sha256 + ":" + id
+        keydbHits[key]?.let { return@withContext it }
+        val found = runCatching { scanFor(item.file, id.toByteArray(Charsets.US_ASCII)) }.getOrNull() ?: return@withContext null
+        keydbHits[key] = found
+        found
+    }
+
+    private fun scanFor(f: File, needle: ByteArray): Boolean {
+        val buf = ByteArray(4 shl 20)
+        var carry = 0
+        f.inputStream().use { input ->
+            while (true) {
+                val n = input.read(buf, carry, buf.size - carry)
+                if (n <= 0) return false
+                val len = carry + n
+                // 盘 ID 是小写十六进制：把 A–F 换成小写再比
+                for (i in carry until len) {
+                    val c = buf[i]
+                    if (c >= 'A'.code.toByte() && c <= 'F'.code.toByte()) buf[i] = (c + 32).toByte()
+                }
+                var i = 0
+                val last = len - needle.size
+                val first = needle[0]
+                while (i <= last) {
+                    if (buf[i] == first) {
+                        var k = 1
+                        while (k < needle.size && buf[i + k] == needle[k]) k++
+                        if (k == needle.size) return true
+                    }
+                    i++
+                }
+                carry = minOf(needle.size - 1, len)
+                System.arraycopy(buf, len - carry, buf, 0, carry)
+            }
+        }
+    }
+
     /** 删除组件。连同它缓存的密钥一起删（CSS 的标题密钥；AACS 的 VUK 等，删组件或 KEYDB.cfg 都清）。 */
     fun remove(kind: Kind) {
         dirFor(kind).listFiles()?.forEach {

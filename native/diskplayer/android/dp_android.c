@@ -5,6 +5,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <GLES3/gl3.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -830,7 +831,7 @@ JNIEXPORT void JNICALL JFN(nativeSetSurface)(JNIEnv *env, jclass cls, jlong h, j
  * longs：位置 ms、时长 ms、读盘字节、读错扇区、显示帧数、丢帧数、音频帧数；
  * strings：音轨说明 + 字幕说明 + 视频编码名 + 音频编码名 + 错误。
  */
-#define STATE_INTS 33
+#define STATE_INTS 34
 static jobjectArray make_strings(JNIEnv *env, int na, char (*audio)[24], int ns, char (*subs)[8], int vcodec, int acodec, const char *error) {
     jclass sc = (*env)->FindClass(env, "java/lang/String");
     jobjectArray arr = (*env)->NewObjectArray(env, na + ns + 3, sc, NULL);
@@ -868,7 +869,8 @@ JNIEXPORT jobjectArray JNICALL JFN(nativeGetState)(JNIEnv *env, jclass cls, jlon
         jint a[STATE_INTS] = {domain, s.title == 0xFFFF ? 0 : s.title, s.chapter, s.titles, s.chapters, s.menu ? 1 : 0, 0, s.still, s.paused,
                               s.ended, s.audio_count, s.audio_current, s.pg_count, s.pg_current, s.pg_shown, s.angles, s.angle,
                               s.video_w, s.video_h, s.video_h > 0 && s.video_w * 10 / s.video_h >= 15, p->disp_w, p->disp_h, p->frame_w,
-                              p->frame_h, s.audio_codec_id, 1, s.mode, s.menu, s.popup, s.playlist, s.bdj, s.plane_w, s.plane_h};
+                              p->frame_h, s.audio_codec_id, 1, s.mode, s.menu, s.popup, s.playlist, s.bdj, s.plane_w, s.plane_h,
+                              (jint)llround(s.video_fps * 1000)};
         memcpy(iv, a, sizeof(a));
         jlong l[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
                       (jlong)s.audio_frames};
@@ -883,6 +885,7 @@ JNIEXPORT jobjectArray JNICALL JFN(nativeGetState)(JNIEnv *env, jclass cls, jlon
                   s.audio_count, s.audio_current, s.spu_count, s.spu_current, s.spu_shown, s.angles, s.angle,
                   s.video_w, s.video_h, s.wide, p->disp_w, p->disp_h, p->frame_w, p->frame_h, s.audio_code};
     memcpy(iv, a, sizeof(a));
+    iv[33] = (jint)llround(s.video_fps * 1000);
     jlong l[7] = {s.position_ms, s.duration_ms, (jlong)s.bytes_read, (jlong)s.read_errors, (jlong)s.frames_shown, (jlong)s.frames_dropped,
                   (jlong)s.audio_frames};
     memcpy(lv, l, sizeof(l));

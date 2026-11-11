@@ -118,6 +118,19 @@ class VideoDiscTest {
     }
 
     @Test
+    fun aacsFilesTellDiscIdMkbVersionAndBusEncryption() {
+        // MKB_RO.inf：类型和版本记录（10h，长度 12），MKB 类型 3、版本 72
+        val mkb = byteArrayOf(0x10, 0, 0, 0x0C, 0, 3, 0x10, 0x03, 0, 0, 0, 72)
+        assertEquals(72, AacsDiscInfo.mkbVersion(mkb))
+        assertEquals(null, AacsDiscInfo.mkbVersion(byteArrayOf(0x81.toByte(), 0, 0, 0x14)))
+        // Content000.cer：类型 00h（AACS 1），第 2 字节最高位 = 总线加密
+        assertEquals(true, AacsDiscInfo.busEncryption(byteArrayOf(0x00, 0x80.toByte(), 0, 0)))
+        assertEquals(false, AacsDiscInfo.busEncryption(byteArrayOf(0x00, 0x00, 0, 0)))
+        // 盘 ID = Unit_Key_RO.inf 的 SHA-1（KEYDB.cfg 里每张盘的条目按它记）
+        assertEquals("a9993e364706816aba3e25717850c26c9cd0d89d", AacsDiscInfo.sha1Hex("abc".toByteArray()))
+    }
+
+    @Test
     fun indexVersionTellsUltraHdApart() {
         fun head(s: String) = (s + "\u0000\u0000\u0000\u0000").toByteArray(Charsets.ISO_8859_1)
         assertEquals(300, BdmvReader.parseIndexVersion(head("INDX0300")))

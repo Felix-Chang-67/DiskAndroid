@@ -1,6 +1,9 @@
 package io.github.felixchang67.diskandroid.video
 
+import android.hardware.display.DisplayManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -13,6 +16,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.github.felixchang67.diskandroid.DiskApp
 import io.github.felixchang67.diskandroid.core.player.DiscPlayer
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * 全屏视频播放界面（横屏）。播放器本身在 [VideoPlaybackController] 里（进程级），这里只负责画面、操作和按键。
@@ -20,6 +25,18 @@ import kotlinx.coroutines.launch
  */
 class VideoPlayerActivity : ComponentActivity() {
     private val video: VideoPlaybackController get() = (application as DiskApp).container.video
+
+    /** 已经按哪个视频帧率挑过屏幕模式（避免重复设置）。 */
+    private var matchedFps = 0.0
+    private var loggedRefresh = 0f
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            val d = window.decorView.display ?: return
+            if (d.displayId == displayId) logRefresh("变了")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,9 +50,58 @@ class VideoPlayerActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.CREATED) {
-                video.screen.collect { if (it == null && !isFinishing) finish() }
+                video.screen.collect {
+                    if (it == null && !isFinishing) finish()
+                    it?.state?.videoFps?.let { fps -> matchRefreshRate(fps) }
+                }
             }
         }
+        getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+    }
+
+    /**
+     * 屏幕刷新率配合视频帧率：在和现在分辨率相同的模式里，挑刷新率是视频帧率整数倍（差 0.5% 以内）、又不低于 60 Hz 的最低一个
+     * （软下拉的电影 23.976 → 120 Hz，每帧正好 5 次刷新，不会 2 / 3 次交替；59.94 → 60 Hz）。找不到合适的就交给系统。
+     * 原生层也用 setFrameRate 告诉了系统帧率，HyperOS 不一定照办，这里再用窗口的 preferredDisplayModeId 明确要一次。
+     */
+    private fun matchRefreshRate(fps: Double) {
+        if (fps <= 0 || abs(fps - matchedFps) < 0.01) return
+        val display = window.decorView.display ?: return // 界面还没显示出来：下次状态更新再来
+        matchedFps = fps
+        val current = display.mode
+        val modes = display.supportedModes.filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+        val best = modes.filter { m ->
+            val ratio = m.refreshRate / fps
+            val k = ratio.roundToInt()
+            k >= 1 && abs(ratio - k) / k < 0.005 && m.refreshRate >= 59f
+        }.minByOrNull { it.refreshRate }
+        val lp = window.attributes
+        val id = best?.modeId ?: 0
+        if (lp.preferredDisplayModeId != id) {
+            lp.preferredDisplayModeId = id
+            window.attributes = lp
+        }
+        video.note(
+            "视频帧率 %.3f：请求屏幕 %s（这块屏能用的刷新率：%s Hz）".format(
+                fps, best?.let { "%.0f Hz".format(it.refreshRate) } ?: "由系统决定（没有整数倍的刷新率）",
+                modes.map { "%.0f".format(it.refreshRate) }.distinct().joinToString(" / "),
+            ),
+        )
+        logRefresh("请求之后")
+    }
+
+    private fun logRefresh(why: String) {
+        val rate = window.decorView.display?.refreshRate ?: return
+        if (abs(rate - loggedRefresh) < 0.5f) return
+        loggedRefresh = rate
+        video.note("屏幕刷新率（$why）：%.1f Hz".format(rate))
+    }
+
+    override fun onDestroy() {
+        getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
+        // 从最近任务里划掉之类：界面没了，播放也停掉
+        if (isFinishing && video.screen.value != null) video.stop("播放界面被关闭")
+        super.onDestroy()
     }
 
     private fun close(reason: String) {
@@ -47,12 +113,6 @@ class VideoPlayerActivity : ComponentActivity() {
         // 离开界面就暂停（回来后点播放继续）
         if (!isFinishing) video.pause()
         super.onStop()
-    }
-
-    override fun onDestroy() {
-        // 从最近任务里划掉之类：界面没了，播放也停掉
-        if (isFinishing && video.screen.value != null) video.stop("播放界面被关闭")
-        super.onDestroy()
     }
 
     /** 遥控器 / 键盘：菜单里方向键移动高亮、确定键选择；播放时左右键快退快进。 */

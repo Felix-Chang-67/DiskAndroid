@@ -8,6 +8,7 @@
 #include <libavutil/log.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,7 +146,13 @@ typedef struct {
     int c_w, c_h, c_fmt;
     bool need_first;
     int64_t last_pts;
-    double out_fps;              /* 这一帧的输出帧率（给平台挑屏幕刷新率） */
+    /* 帧时间轴（见 v_timeline）：下一帧应该开始的时刻（90 kHz，带小数；NAN = 还没有）、最近 8 帧的显示时长 */
+    double next_pts;
+    double dur_hist[8];
+    int dur_n;
+    /* 告诉平台的帧率（给系统挑屏幕刷新率）：新的值连续 24 帧都一样才换，免得来回切 */
+    double out_fps, cand_fps;
+    int cand_frames;
     /* 每 10 秒一次的播放统计 */
     int64_t st_start_us, st_last_present_us, st_max_gap_us, st_max_late_us, st_decode_max_us;
     int st_shown, st_dropped, st_late;
@@ -372,6 +379,7 @@ static void v_present(dp_av *d, vstate *v, AVFrame *f, bool force) {
     d->st.video_w = f->width;
     d->st.video_h = f->height;
     d->st.clock_pts = pts;
+    d->st.video_fps = v->out_fps;
     pthread_mutex_unlock(&d->st_lock);
     if (v->need_first) {
         v->need_first = false;
@@ -380,11 +388,90 @@ static void v_present(dp_av *d, vstate *v, AVFrame *f, bool force) {
 }
 
 /* 一帧的时长（90 kHz）：解码器给的，或者按帧率算。 */
-static int64_t v_frame_duration(vstate *v, const AVFrame *f) {
-    if (f->duration > 0) return f->duration;
+/*
+ * 一帧要显示多久（90 kHz）：编码帧率的一帧 = 两场，repeat_pict 是多显示的场数。
+ * DVD / 蓝光上的 24 帧电影常用"软 3:2 下拉"：序列标 29.97 帧/秒，每隔一帧标"多显示一场"（repeat_pict = 1），
+ * 所以帧时长是 2 场、3 场交替（33.4 / 50.0 ms），平均 23.976 帧/秒。
+ */
+static double v_natural_duration(vstate *v, const AVFrame *f) {
     AVRational fr = v->ctx->framerate;
-    if (fr.num > 0 && fr.den > 0) return av_rescale_q(1, av_inv_q(fr), (AVRational){1, 90000});
-    return 3003;
+    double base = fr.num > 0 && fr.den > 0 ? 90000.0 * fr.den / fr.num : (f->duration > 0 ? (double)f->duration : 3003.0);
+    int rp = f->repeat_pict;
+    if (rp < 0 || rp > 4) rp = 0;
+    return base * (2 + rp) / 2.0;
+}
+
+static void v_timeline_reset(vstate *v) {
+    v->next_pts = NAN;
+    v->dur_n = 0;
+}
+
+/*
+ * 帧的显示时刻。
+ * - 流里不是每帧都有时间戳（DVD 一般一个 GOP 只有一个）：没有的帧接在上一帧结束的地方——用上一帧的显示时长。
+ *   以前用"1 / 编码帧率"推算，软下拉的电影每帧少算了，半秒的 GOP 播快了约 100 ms，到下一个时间戳再停住等：一顿一顿的。
+ * - 软下拉的电影原样显示是 33 / 50 ms 交替的节奏。取最近 8 帧的平均时长（正好 2.5 场）等间隔显示，再告诉系统
+ *   23.976 帧/秒（120 Hz 的屏幕 5:5 显示）。和流里时间戳的差最多半场（8 ms），对口型没影响。
+ * - 有时间戳的帧：和推算的差不多（30 ms 以内）就每次往它靠 1/32（不会越积越多，也看不出跳动），
+ *   差太多（剪辑点、时间轴不连续）以它为准。
+ */
+static int64_t v_timeline(vstate *v, AVFrame *f, double *avg_out) {
+    double nd = v_natural_duration(v, f);
+    v->dur_hist[v->dur_n % 8] = nd;
+    v->dur_n++;
+    int n = v->dur_n < 8 ? v->dur_n : 8;
+    double avg = 0;
+    for (int i = 0; i < n; i++) avg += v->dur_hist[i];
+    avg /= n;
+    *avg_out = avg;
+    int64_t real = f->pts;
+    double pts;
+    if (isnan(v->next_pts)) {
+        if (real == AV_NOPTS_VALUE) real = f->best_effort_timestamp;
+        if (real == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
+        pts = (double)real;
+    } else {
+        pts = v->next_pts;
+        if (real != AV_NOPTS_VALUE) {
+            double err = (double)real - pts;
+            if (fabs(err) > 90 * 30) pts = (double)real;
+            else pts += err / 32;
+        }
+    }
+    v->next_pts = pts + (n >= 4 ? avg : nd);
+    return llround(pts);
+}
+
+/* 常见帧率：差 0.4% 以内就当成它（23.976、29.97、59.94 之类），免得每次算出来有一点点不同就重新告诉系统。 */
+static double v_standard_fps(double fps) {
+    static const double std[] = {23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94, 60};
+    for (size_t i = 0; i < sizeof(std) / sizeof(std[0]); i++) {
+        if (fabs(fps - std[i]) / std[i] < 0.004) return std[i];
+    }
+    return fps;
+}
+
+/* 按实际的帧间隔更新要告诉系统的帧率（隔行的帧过去隔行后每场一帧，帧率翻倍）。 */
+static void v_update_fps(vstate *v, double avg_dur, bool doubled) {
+    if (avg_dur <= 0 || v->dur_n < 4) return;
+    double fps = v_standard_fps(90000.0 / avg_dur * (doubled ? 2 : 1));
+    if (v->out_fps <= 0) {
+        v->out_fps = fps;
+        return;
+    }
+    if (fabs(fps - v->out_fps) < 0.01) {
+        v->cand_frames = 0;
+        return;
+    }
+    if (fabs(fps - v->cand_fps) < 0.01) {
+        if (++v->cand_frames >= 24) {
+            v->out_fps = fps;
+            v->cand_frames = 0;
+        }
+    } else {
+        v->cand_fps = fps;
+        v->cand_frames = 1;
+    }
 }
 
 /* 转成 8 位 YUV420P 的滤镜（画面这一层只认 YUV420P）。 */
@@ -418,14 +505,12 @@ static bool v_convert(dp_av *d, vstate *v, AVFrame *f, AVFrame *out) {
 }
 
 /* 一帧 YUV420P：要去隔行就过滤镜（每场一帧，时间基换回 90 kHz），然后显示。 */
-static void v_output420(dp_av *d, vstate *v, AVFrame *f, bool drain, double fps) {
+static void v_output420(dp_av *d, vstate *v, AVFrame *f, bool drain) {
     bool interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
-    v->out_fps = v->deint_active ? fps * 2 : fps;
     if (d->opt.deinterlace && (interlaced || v->deint_active)) {
         if (!v->graph || f->width != v->g_w || f->height != v->g_h || f->format != v->g_fmt) v_build_graph(d, v, f);
         if (v->graph && av_buffersrc_add_frame_flags(v->bsrc, f, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0) {
             v->deint_active = true;
-            v->out_fps = fps * 2;
             AVRational tb = av_buffersink_get_time_base(v->bsink);
             while (av_buffersink_get_frame(v->bsink, v->filt) >= 0) {
                 if (v->filt->pts != AV_NOPTS_VALUE) v->filt->pts = av_rescale_q(v->filt->pts, tb, (AVRational){1, 90000});
@@ -440,12 +525,12 @@ static void v_output420(dp_av *d, vstate *v, AVFrame *f, bool drain, double fps)
 
 /* 解码出来的一帧：补时间戳，必要时转格式，再去隔行 / 显示。 */
 static void v_output(dp_av *d, vstate *v, AVFrame *f, bool drain) {
-    if (f->pts == AV_NOPTS_VALUE) f->pts = f->best_effort_timestamp;
-    if (f->pts == AV_NOPTS_VALUE && v->last_pts != DP_NOPTS) f->pts = v->last_pts + v_frame_duration(v, f);
+    double avg = 0;
+    f->pts = v_timeline(v, f, &avg);
     if (f->pts != AV_NOPTS_VALUE) v->last_pts = f->pts;
-    double fps = v->ctx->framerate.num > 0 && v->ctx->framerate.den > 0 ? av_q2d(v->ctx->framerate) : 0;
+    v_update_fps(v, avg, d->opt.deinterlace && (f->flags & AV_FRAME_FLAG_INTERLACED));
     if (f->format == AV_PIX_FMT_YUV420P || f->format == AV_PIX_FMT_YUVJ420P) {
-        v_output420(d, v, f, drain, fps);
+        v_output420(d, v, f, drain);
         return;
     }
     AVFrame *c = av_frame_alloc();
@@ -453,7 +538,7 @@ static void v_output(dp_av *d, vstate *v, AVFrame *f, bool drain) {
     if (v_convert(d, v, f, c)) {
         c->flags = f->flags;
         c->pts = f->pts;
-        v_output420(d, v, c, drain, fps);
+        v_output420(d, v, c, drain);
     }
     av_frame_free(&c);
 }
@@ -477,6 +562,7 @@ static void v_decode(dp_av *d, vstate *v, const uint8_t *data, int size, int64_t
         }
         /* 排空之后解码器要重置才能接着解 */
         v_reset_codec(v);
+        v_timeline_reset(v);
         return;
     }
     int64_t ipts = pts == DP_NOPTS ? AV_NOPTS_VALUE : pts;
@@ -529,6 +615,7 @@ static void *video_thread(void *arg) {
     v.last = av_frame_alloc();
     v.need_first = true;
     v.last_pts = DP_NOPTS;
+    v_timeline_reset(&v);
     while (!d->quit) {
         dp_packet *p = dp_queue_get(&d->vq, 20);
         if (!p) {
@@ -539,6 +626,7 @@ static void *video_thread(void *arg) {
         switch (p->kind) {
             case DP_PKT_FLUSH:
                 v_reset_codec(&v);
+                v_timeline_reset(&v);
                 v.last_pts = DP_NOPTS;
                 v.need_first = true;
                 break;

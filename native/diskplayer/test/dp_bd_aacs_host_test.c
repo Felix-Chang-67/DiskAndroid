@@ -85,6 +85,18 @@ static int mock_scsi(void *opaque, const uint8_t *cdb, int cdb_len, int dir, uin
     return 1;
 }
 static void mock_log(void *opaque, int level, const char *msg) { (void)opaque; (void)level; (void)msg; n_logs++; }
+
+/* 播放器自己的日志（dp_log）：留下 BD 标签的，检查里面的内容；其余照常打印 */
+static char bd_log[16384];
+static void capture_log(void *opaque, dp_log_level level, const char *tag, const char *msg) {
+    (void)opaque;
+    (void)level;
+    if (strcmp(tag, "BD") == 0 && strlen(bd_log) + strlen(msg) + 2 < sizeof(bd_log)) {
+        strcat(bd_log, msg);
+        strcat(bd_log, "\n");
+    }
+    printf("  [%s] %s\n", tag, msg);
+}
 static dc_host_api mock_host = {DC_HOST_API_VERSION, NULL, mock_scsi, mock_log};
 
 static dp_bd *open_iso(const char *iso, host *h, dp_source **src, char *err, int errlen) {
@@ -154,6 +166,7 @@ int main(int argc, char **argv) {
     host h;
     dp_source *src;
     char err[256];
+    dp_log_set(capture_log, NULL);
 
     /* ---- 1：没有组件 ---- */
     dp_bd *bd = open_iso(iso, &h, &src, err, sizeof(err));
@@ -173,6 +186,8 @@ int main(int argc, char **argv) {
         dp_bd_state s;
         dp_bd_get_state(bd, &s);
         CHECK(s.aacs, "状态里标了 AACS");
+        CHECK(strstr(bd_log, "总线加密 开") != NULL, "读出了内容证书里的总线加密标志");
+        CHECK(strstr(bd_log, "盘 ID ") != NULL, "日志里有盘 ID（查 KEYDB 用）");
         dp_bd_start(bd);
         for (int i = 0; i < 1000; i++) {
             dp_bd_get_state(bd, &s);

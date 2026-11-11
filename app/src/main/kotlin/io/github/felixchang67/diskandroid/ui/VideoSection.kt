@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -116,6 +117,15 @@ private fun PlayBlock(
             color = if (region.warning != null) StatusColors.warn else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         region.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = StatusColors.warn) }
+    }
+    if (info.aacsInfo != null && refusal == null) {
+        // AACS 蓝光：事先判断能不能播（要扫一遍 KEYDB.cfg，一两秒）
+        val verdict by produceState<Pair<String, Boolean>?>(null, info.aacsInfo?.discId) { value = video.aacsVerdict(session, info) }
+        Text(
+            verdict?.first ?: "正在 KEYDB.cfg 里找这张盘…",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (verdict?.second == true) StatusColors.warn else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     when {
         refusal != null -> Text(refusal, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)

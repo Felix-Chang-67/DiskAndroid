@@ -199,6 +199,36 @@ class VideoPlaybackController(
         } ?: nativeProblem()
     }
 
+    private val aacsVerdictsLogged = mutableSetOf<String>()
+
+    /**
+     * AACS 蓝光事先能判断的情况（组件和 KEYDB.cfg 都有时）：盘 ID、MKB 版本、总线加密、KEYDB 里有没有这张盘，
+     * 以及大概能不能播。开了总线加密、光驱又支持时，播放必须和光驱认证，而公开的主机证书已被新盘吊销（N3 真机上光驱返回 5/6F/00）。
+     * 返回 (说明, 是否多半播不了)；不是 AACS 盘或缺组件时返回 null（那种情况 [refusal] 会说）。
+     */
+    suspend fun aacsVerdict(session: DriveSession, info: VideoDiscInfo): Pair<String, Boolean>? {
+        val a = info.aacsInfo ?: return null
+        if (info.bd?.uhd == true || aacsMissing() != null) return null
+        val inKeydb = a.discId?.let { decrypt.keydbHas(it) }
+        val driveBec = session.info.value?.features?.aacs?.busEncryption
+        val bee = a.busEncryption == true
+        val facts = "AACS：盘 ID ${a.discId?.let { it.take(8) + "…" } ?: "读不出"}，MKB 版本 ${a.mkbVersion ?: "?"}，总线加密" +
+            (if (bee) "开" else "关") + "；KEYDB.cfg 里" + when (inKeydb) { true -> "有"; false -> "没有"; null -> "（没查到）" } + "这张盘的密钥"
+        val (verdict, bad) = when {
+            bee && driveBec != false ->
+                "这张盘开了总线加密（这台光驱也支持），播放时必须先和光驱认证，而公开的主机证书已被新盘吊销：" +
+                    "用公开的 KEYDB.cfg 多半播不了，KEYDB 里有它的密钥也一样" to true
+            inKeydb == true -> "可以直接解密播放，不用和光驱认证" to false
+            else -> "要和光驱认证读卷标识，公开的主机证书多半已被吊销，大概率打不开" to true
+        }
+        val text = "$facts。$verdict。"
+        if (a.discId == null || aacsVerdictsLogged.add(a.discId!!)) {
+            log.i(TAG, "蓝光 AACS 预判：$verdict", "盘 ID" to a.discId, "MKB 版本" to a.mkbVersion, "总线加密" to a.busEncryption,
+                "光驱支持总线加密" to driveBec, "KEYDB 里有" to inKeydb)
+        }
+        return text to bad
+    }
+
     /** AACS 盘需要的组件缺了哪个（null = 都有）。 */
     private fun aacsMissing(): String? = when {
         decrypt.file(DecryptComponents.Kind.AACS) == null -> "$PROTECTED_MESSAGE（AACS：要导入蓝光解密组件和 KEYDB.cfg）"
@@ -526,6 +556,9 @@ class VideoPlaybackController(
     }
 
     // ---------------- 操作（播放界面调用） ----------------
+
+    /** 播放界面的记录（屏幕刷新率之类）写进 VIDEO 日志。 */
+    fun note(msg: String) = log.i(TAG, msg)
 
     fun command(cmd: Int, a1: Int = 0, a2: Int = 0) {
         val c = current ?: return

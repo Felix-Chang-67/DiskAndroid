@@ -16,6 +16,7 @@ class DiscPlayerStateTest {
             2, 1, 720, 480, 1, // 角度数、当前角度、视频宽、视频高、16:9
             1920, 1080, 720, 480, 0xA0, // 显示宽、显示高、帧宽、帧高、音频流
             0, 0, 0, 0, 0, 0, 0, 0, // DVD：蓝光字段都是 0
+            23976, // 显示帧率 × 1000（软下拉的电影）
         )
         val longs = longArrayOf(61_000, 5_400_000, 123_456_789, 4, 9000, 12, 2_880_000)
         val s = DiscPlayer.parseState(ints, longs, arrayOf("ja AC-3 6ch", "ja LPCM 2ch", "ja", "zh", "en", "mpeg2video", "pcm_dvd", ""))
@@ -42,11 +43,12 @@ class DiscPlayerStateTest {
         assertEquals(DiscPlayer.Kind.DVD, s.kind)
         assertEquals("mpeg2video", s.videoCodec)
         assertEquals("pcm_dvd", s.audioCodec)
+        assertEquals(23.976, s.videoFps, 1e-9)
     }
 
     @Test
     fun parsesBlurayFields() {
-        val ints = IntArray(33).also {
+        val ints = IntArray(34).also {
             it[0] = 2 // 菜单显示中 → 当作菜单域
             it[5] = 1
             it[10] = 1
@@ -72,7 +74,7 @@ class DiscPlayerStateTest {
 
     @Test
     fun menuStateAndMissingStrings() {
-        val ints = IntArray(33).also {
+        val ints = IntArray(34).also {
             it[0] = 2 // 主菜单
             it[5] = 4 // 4 个按钮
             it[6] = 1
@@ -82,6 +84,7 @@ class DiscPlayerStateTest {
             it[24] = -1
         }
         val s = DiscPlayer.parseState(ints, LongArray(7), null)
+        assertEquals(0.0, s.videoFps) // 还不知道
         assertEquals(DiscPlayer.Domain.VMG_MENU, s.domain)
         assertTrue(s.inMenu)
         assertTrue(s.still)

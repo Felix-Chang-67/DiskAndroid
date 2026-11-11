@@ -38,6 +38,10 @@ struct dp_dvd {
     int audio_phys;          /* 当前物理音轨（0..7），-1 = 无 */
     int audio_code;          /* 要解码的流：AC-3 0x80+n、DTS 0x88+n、LPCM 0xA0+n、MPEG 0xC0+n；-1 = 无 */
     bool audio_user;         /* 用户手动选过音轨：不再按语言偏好自动选 */
+    int audio_logical;       /* 光盘的"当前音轨"寄存器（SPRM1，逻辑号；15 = 光盘没指定），来自音轨事件 */
+    /* 选中的格式一个包都没有、同一音轨号的别的格式却一直有：连续几个 VOBU 这样就改按实际的格式解码（见 demux_audio） */
+    bool audio_sel_seen, audio_alt_seen;
+    int audio_alt_code, audio_miss;
     int spu_phys;            /* 当前物理字幕（0..31），-1 = 无 */
     int64_t ts_offset;       /* 把 PTS 跳变接成连续时间轴的偏移 */
     int64_t prev_vobu_end;
@@ -189,8 +193,22 @@ static bool audio_selected(dp_dvd *d, int code) {
     return d->audio_code >= 0 && code == d->audio_code;
 }
 
+/*
+ * 物理音轨号 + 格式 → 子流号。格式要按"逻辑音轨"查 IFO：光盘程序没指定音轨时逻辑号是 15（无效），
+ * libdvdnav 自己挑了第一条可用的物理音轨，这时反查是哪条逻辑音轨（以前直接用 15 去查，查不到就当成 AC-3，
+ * 只有 LPCM 的盘就没有声音）。
+ */
 static int audio_code_for(dp_dvd *d, int physical, int logical) {
     if (physical < 0) return -1;
+    if (logical < 0 || logical >= 8) {
+        logical = -1;
+        for (int i = 0; i < 8; i++) {
+            if (dvdnav_get_audio_logical_stream(d->nav, (uint8_t)i) == physical) {
+                logical = i;
+                break;
+            }
+        }
+    }
     uint16_t fmt = logical >= 0 ? dvdnav_audio_stream_format(d->nav, (uint8_t)logical) : DVD_AUDIO_FORMAT_AC3;
     switch (fmt) {
         case DVD_AUDIO_FORMAT_LPCM: return 0xA0 + (physical & 7);
@@ -199,6 +217,52 @@ static int audio_code_for(dp_dvd *d, int physical, int logical) {
         case DVD_AUDIO_FORMAT_MPEG2_EXT: return 0xC0 + (physical & 7);
         default: return 0x80 + (physical & 7);
     }
+}
+
+static void set_audio_code(dp_dvd *d, int code, int physical, const char *why, bool flush);
+
+/*
+ * 一个音频包：是选中的音轨就送去解码。另外记下有没有"同一个音轨号、别的格式"的包：不同格式的音轨号可以相同
+ * （AC-3 的 0 号和 LPCM 的 0 号是两条音轨），所以只有选中的格式连续几个 VOBU 一个包都没有、它却一直有时，
+ * 才认为是 IFO 里写的格式和实际的流对不上（见 check_audio_format）。
+ */
+static void demux_audio(dp_dvd *d, int code, int64_t t, const uint8_t *data, int len) {
+    if (audio_selected(d, code)) {
+        d->audio_sel_seen = true;
+        dp_av_audio(d->av, code, audio_codec(code), t, data, len);
+        return;
+    }
+    if (d->audio_code >= 0 && (code & 7) == (d->audio_code & 7) && audio_codec(code) != AV_CODEC_ID_NONE) {
+        d->audio_alt_seen = true;
+        d->audio_alt_code = code;
+    }
+}
+
+/* 每个 VOBU 开头：选中的音轨格式连续 3 个 VOBU 都没有数据，同一音轨号的另一种格式却有，就改用它（免得一直没声音）。 */
+static void check_audio_format(dp_dvd *d) {
+    if (d->audio_sel_seen || !d->audio_alt_seen) {
+        d->audio_miss = 0;
+    } else if (++d->audio_miss >= 3) {
+        dp_log(DP_LOG_WARN, TAG, "音轨 %d 的实际格式和 IFO 里写的不一样（要的是 %02Xh，盘上只有 %02Xh）：按实际的解码",
+               (d->audio_alt_code & 7) + 1, d->audio_code, d->audio_alt_code);
+        set_audio_code(d, d->audio_alt_code, d->audio_alt_code & 7, "格式纠正", false);
+    }
+    d->audio_sel_seen = d->audio_alt_seen = false;
+}
+
+/* 换要解码的音频流。[flush]：丢掉已经排队的声音——换音轨时要；换标题集（正片放完回菜单之类）时不要，不然结尾的声音会被截掉。 */
+static void set_audio_code(dp_dvd *d, int code, int physical, const char *why, bool flush) {
+    d->audio_miss = 0;
+    d->audio_sel_seen = d->audio_alt_seen = false;
+    if (code == d->audio_code) return;
+    d->audio_phys = physical;
+    d->audio_code = code;
+    dp_log(DP_LOG_INFO, TAG, "音轨（%s）：物理 %d，流 %02Xh", why, physical, code < 0 ? 0 : code);
+    pthread_mutex_lock(&d->st_lock);
+    d->st.audio_code = code;
+    pthread_mutex_unlock(&d->st_lock);
+    emit(d, DP_EV_STATE, 0, 0, NULL);
+    if (flush) dp_av_flush_audio(d->av);
 }
 
 /* 解一个 2048 字节的 MPEG-PS 包（DVD 的 pack），把各路数据送进队列。 */
@@ -239,14 +303,14 @@ static void demux_pack(dp_dvd *d, const uint8_t *b, int len) {
         if (id >= 0xE0 && id <= 0xEF) {
             dp_av_video(d->av, AV_CODEC_ID_MPEG2VIDEO, t, DP_NOPTS, b + q, end - q);
         } else if (id >= 0xC0 && id <= 0xDF) {
-            if (audio_selected(d, id)) dp_av_audio(d->av, id, audio_codec(id), t, b + q, end - q);
+            demux_audio(d, id, t, b + q, end - q);
         } else if (id == 0xBD) {
             int sub = b[q];
             if (sub >= 0x20 && sub <= 0x3F) {
                 handle_spu(d, sub & 0x1F, b + q + 1, end - q - 1, t);
             } else if (sub >= 0x80 && sub <= 0xAF) {
                 /* 子流号 + 帧数 + 首个访问单元指针，之后是数据（LPCM 还带 3 字节头，留给解码器） */
-                if (audio_selected(d, sub) && q + 4 < end) dp_av_audio(d->av, sub, audio_codec(sub), t, b + q + 4, end - q - 4);
+                if (q + 4 < end) demux_audio(d, sub, t, b + q + 4, end - q - 4);
             }
         }
     }
@@ -275,14 +339,16 @@ static void update_streams_state(dp_dvd *d) {
         if (lang == 0xFFFF || !l[0]) strcpy(l, "--");
         snprintf(s->audio_desc[i], sizeof(s->audio_desc[i]), "%s %s %uch", l, f, (unsigned)ch);
     }
-    /* dvdnav 的 get_active_*_stream 返回物理流号；界面要的是逻辑序号（音轨 1、2…），反查一下 */
+    /* 界面要逻辑序号（音轨 1、2…）。光盘的音轨寄存器有效就用它；没指定（15）时 libdvdnav 播的是第一条可用的，
+     * 按物理号反查（不同格式的音轨物理号可以相同，所以寄存器有效时不能反查） */
     int8_t aphys = dvdnav_get_active_audio_stream(d->nav);
     s->audio_current = -1;
-    for (int i = 0; aphys >= 0 && i < s->audio_count; i++) {
-        if (dvdnav_get_audio_logical_stream(d->nav, (uint8_t)i) == aphys) {
-            s->audio_current = i;
-            break;
-        }
+    if (d->audio_logical >= 0 && d->audio_logical < s->audio_count &&
+        dvdnav_get_audio_logical_stream(d->nav, (uint8_t)d->audio_logical) == aphys) {
+        s->audio_current = d->audio_logical;
+    }
+    for (int i = 0; s->audio_current < 0 && aphys >= 0 && i < s->audio_count; i++) {
+        if (dvdnav_get_audio_logical_stream(d->nav, (uint8_t)i) == aphys) s->audio_current = i;
     }
     s->spu_count = ns < 0 ? 0 : (ns > 32 ? 32 : ns);
     for (int i = 0; i < s->spu_count; i++) {
@@ -556,22 +622,19 @@ static void *nav_thread(void *arg) {
                         }
                     }
                 }
-                int code = audio_code_for(d, ev->physical, ev->logical);
-                if (code != d->audio_code) {
-                    d->audio_phys = ev->physical;
-                    d->audio_code = code;
-                    dp_log(DP_LOG_INFO, TAG, "音轨：逻辑 %d，物理 %d，流 %02Xh", ev->logical, ev->physical, code < 0 ? 0 : code);
-                    pthread_mutex_lock(&d->st_lock);
-                    d->st.audio_code = code;
-                    pthread_mutex_unlock(&d->st_lock);
-                    emit(d, DP_EV_STATE, 0, 0, NULL);
-                    dp_av_flush_audio(d->av);
-                }
+                d->audio_logical = ev->logical;
+                set_audio_code(d, audio_code_for(d, ev->physical, ev->logical), ev->physical, "音轨切换", true);
                 break;
             }
             case DVDNAV_VTS_CHANGE:
             case DVDNAV_CELL_CHANGE:
                 update_position_state(d);
+                if (event == DVDNAV_VTS_CHANGE) {
+                    /* 换了标题集 / 菜单和正片之间切换：音轨寄存器可能没变（不发音轨事件），但格式表换了，重新算一次
+                     * （先更新域，状态里不会出现"还在正片、音轨已经是菜单的"） */
+                    set_audio_code(d, audio_code_for(d, dvdnav_get_active_audio_stream(d->nav), d->audio_logical),
+                                   dvdnav_get_active_audio_stream(d->nav), "换了标题集", false);
+                }
                 if (event == DVDNAV_CELL_CHANGE) {
                     dvdnav_cell_change_event_t *ev = (dvdnav_cell_change_event_t *)buf;
                     pthread_mutex_lock(&d->st_lock);
@@ -581,6 +644,7 @@ static void *nav_thread(void *arg) {
                 emit(d, DP_EV_STATE, 0, 0, NULL);
                 break;
             case DVDNAV_NAV_PACKET: {
+                check_audio_format(d);
                 pci_t *pci = dvdnav_get_current_nav_pci(d->nav);
                 if (pci) {
                     int64_t s = pci->pci_gi.vobu_s_ptm, e = pci->pci_gi.vobu_e_ptm;
@@ -636,6 +700,7 @@ dp_dvd *dp_dvd_open(dp_source *src, const dp_platform *pf, const dp_dvd_options 
     d->pf = *pf;
     d->opt = *opt;
     d->audio_phys = -1;
+    d->audio_logical = 15;
     d->audio_code = -1;
     d->spu_phys = -1;
     d->spu_asm_stream = -1;
@@ -712,6 +777,7 @@ void dp_dvd_get_state(dp_dvd *d, dp_dvd_state *out) {
     out->clock_pts = as.clock_pts;
     out->video_codec_id = as.video_codec;
     out->audio_codec_id = as.audio_codec;
+    out->video_fps = as.video_fps;
 }
 
 void dp_dvd_refresh(dp_dvd *d) {

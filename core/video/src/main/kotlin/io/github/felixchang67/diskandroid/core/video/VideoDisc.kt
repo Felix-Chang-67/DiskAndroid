@@ -3,6 +3,9 @@ package io.github.felixchang67.diskandroid.core.video
 import io.github.felixchang67.diskandroid.core.fs.ContentKind
 import io.github.felixchang67.diskandroid.core.fs.DiscContent
 import io.github.felixchang67.diskandroid.core.fs.DiscFileSystem
+import io.github.felixchang67.diskandroid.core.fs.SectorReadException
+import io.github.felixchang67.diskandroid.core.fs.find
+import io.github.felixchang67.diskandroid.core.fs.readAll
 
 enum class VideoFormat(val label: String) {
     DVD_VIDEO("DVD-Video"),
@@ -37,6 +40,8 @@ class VideoDiscInfo(
     val aacs: Boolean,
     val dvd: DvdVideoDisc? = null,
     val bd: BdDisc? = null,
+    /** AACS 加密的蓝光：盘 ID、MKB 版本、总线加密标志（读不出的项为 null）。 */
+    val aacsInfo: AacsDiscInfo? = null,
 ) {
     /** 很短（不到 [SHORT_MS]）的标题：DVD 的版权警告、菜单背景之类。 */
     val shortTitles: Int get() = titles.count { it.durationMs < SHORT_MS }
@@ -45,6 +50,10 @@ class VideoDiscInfo(
         val out = mutableListOf<String>()
         out += "视频结构：${format.label}，${titles.size} 个标题" + (if (filtered > 0) "（另有 $filtered 个重复 / 循环播放列表已过滤）" else "") +
             (main?.let { "，主片 ${it.id}（${formatDuration(it.durationMs)}）" } ?: "")
+        aacsInfo?.let { a ->
+            out += "  AACS：盘 ID ${a.discId ?: "读不出"}，MKB 版本 ${a.mkbVersion ?: "?"}，总线加密 " +
+                when (a.busEncryption) { true -> "开"; false -> "关"; null -> "不明" }
+        }
         bd?.indexVersion?.let { v ->
             out += "  index.bdmv 版本 %04d".format(v) + if (bd.uhd) "：Ultra HD Blu-ray（4K）" + (if (aacs) "，AACS 2.0 加密（不支持）" else "") else ""
         }
@@ -119,6 +128,55 @@ object VideoAnalyzer {
             )
         }
         val sorted = titles.sortedWith(compareByDescending<VideoTitle> { it.bd === disc.main }.thenByDescending { it.durationMs }.thenBy { it.id })
-        return VideoDiscInfo(format, sorted, sorted.firstOrNull { it.bd === disc.main }, disc.filtered, disc.warnings, aacs, bd = disc)
+        val aacsInfo = if (aacs) AacsDiscInfo.read(fs) else null
+        return VideoDiscInfo(format, sorted, sorted.firstOrNull { it.bd === disc.main }, disc.filtered, disc.warnings, aacs, bd = disc, aacsInfo = aacsInfo)
+    }
+}
+
+/**
+ * 蓝光 AACS 目录里不加密的几个文件，用来事先判断能不能播（对照 libaacs 0.12.0）：
+ * - 盘 ID：AACS/Unit_Key_RO.inf 整个文件的 SHA-1（KEYDB.cfg 按它记录每张盘的密钥）
+ * - MKB 版本：AACS/MKB_RO.inf 开头的"类型和版本"记录（类型 10h，第 8–11 字节）
+ * - 总线加密：AACS/Content000.cer（或 Content001.cer）第 2 字节的最高位。开了的话，支持总线加密的光驱送出的数据
+ *   还要再解一层，那层密钥只能通过和光驱认证拿到
+ */
+class AacsDiscInfo(val discId: String?, val mkbVersion: Int?, val busEncryption: Boolean?) {
+    companion object {
+        suspend fun read(fs: DiscFileSystem): AacsDiscInfo = AacsDiscInfo(
+            discId = file(fs, "/AACS/Unit_Key_RO.inf", 1 shl 20)?.let { sha1Hex(it) },
+            mkbVersion = file(fs, "/AACS/MKB_RO.inf", 64, head = true)?.let { mkbVersion(it) },
+            busEncryption = (file(fs, "/AACS/Content000.cer", 64, head = true) ?: file(fs, "/AACS/Content001.cer", 64, head = true))
+                ?.let { busEncryption(it) },
+        )
+
+        fun mkbVersion(head: ByteArray): Int? {
+            if (head.size < 12 || head[0].toInt() != 0x10) return null
+            val b = Be(head, "MKB_RO.inf")
+            return b.u32(8).toInt()
+        }
+
+        fun busEncryption(head: ByteArray): Boolean? = if (head.size >= 2) (head[1].toInt() and 0x80) != 0 else null
+
+        fun sha1Hex(data: ByteArray): String =
+            java.security.MessageDigest.getInstance("SHA-1").digest(data).joinToString("") { "%02x".format(it) }
+
+        /** 读一个小文件（整个，或只读开头 [limit] 字节）；没有或读不出为 null。 */
+        private suspend fun file(fs: DiscFileSystem, path: String, limit: Int, head: Boolean = false): ByteArray? {
+            val f = fs.find(path) ?: return null
+            return try {
+                if (head) {
+                    val buf = ByteArray(minOf(limit.toLong(), f.size).toInt())
+                    val n = fs.open(f, cached = true).read(0, buf, 0, buf.size)
+                    buf.copyOf(n.coerceAtLeast(0))
+                } else {
+                    if (f.size > limit) null else fs.readAll(f, limit)
+                }
+            } catch (e: SectorReadException) {
+                if (e.fatal) throw e
+                null
+            } catch (e: java.io.IOException) {
+                null
+            }
+        }
     }
 }
