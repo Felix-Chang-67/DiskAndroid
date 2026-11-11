@@ -11,6 +11,7 @@ endif()
 
 add_library(diskplayer SHARED
         android/dp_android.c
+        src/dp_av.c
         src/dp_core.c
         src/dp_dvd.c
         src/dp_spu.c)

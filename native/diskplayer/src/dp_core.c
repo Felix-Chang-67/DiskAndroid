@@ -64,7 +64,9 @@ dp_packet *dp_packet_new(int kind, int stream, int64_t pts, const uint8_t *data,
     p->next = NULL;
     p->kind = kind;
     p->stream = stream;
+    p->codec = 0;
     p->pts = pts;
+    p->dts = DP_NOPTS;
     p->size = size > 0 ? size : 0;
     if (size > 0 && data) memcpy(p->data, data, size);
     return p;

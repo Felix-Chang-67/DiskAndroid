@@ -37,8 +37,10 @@ enum {
 typedef struct dp_packet {
     struct dp_packet *next;
     int kind;
-    int stream;     /* 私有流 1 的子流号（0x80 AC-3、0xA0 LPCM…）或 MPEG 流号（0xE0 视频、0xC0 音频） */
+    int stream;     /* 区分不同的流：DVD 是子流号（0x80 AC-3、0xA0 LPCM…），蓝光是 PID */
+    int codec;      /* FFmpeg 的 AVCodecID */
     int64_t pts;    /* 90 kHz，已加上不连续点的偏移；DP_NOPTS 表示没有 */
+    int64_t dts;
     int size;
     uint8_t data[];
 } dp_packet;
@@ -111,8 +113,8 @@ typedef struct {
 
 typedef struct dp_platform {
     void *opaque;
-    /* 视频线程调用：显示一帧；overlay 是与帧同尺寸的 RGBA（预乘之前的普通 RGBA），没有字幕 / 菜单时为 NULL。 */
-    void (*video_present)(void *opaque, const dp_frame *f, const uint32_t *overlay, bool overlay_changed);
+    /* 视频线程调用：显示一帧；overlay 是 ov_w × ov_h 的 RGBA（普通 RGBA，铺满整个画面），没有字幕 / 菜单时为 NULL。 */
+    void (*video_present)(void *opaque, const dp_frame *f, const uint32_t *overlay, int ov_w, int ov_h, bool overlay_changed);
     /* 视频线程空闲时（约每 20 ms）调用：处理输出窗口的更换 / 销毁；线程退出前调用 video_exit 释放显示资源。可以为 NULL。 */
     void (*video_idle)(void *opaque);
     void (*video_exit)(void *opaque);

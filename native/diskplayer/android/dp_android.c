@@ -405,7 +405,7 @@ static void hint_frame_rate(jplayer *p, double fps) {
     dp_log(DP_LOG_INFO, "VIDEO", "告诉系统视频帧率 %.3f%s", fps, r == 0 ? "" : "（失败）");
 }
 
-static void video_present(void *opaque, const dp_frame *f, const uint32_t *overlay, bool changed) {
+static void video_present(void *opaque, const dp_frame *f, const uint32_t *overlay, int ov_w, int ov_h, bool changed) {
     jplayer *p = opaque;
     if (!gl_ensure(p)) return;
     hint_frame_rate(p, f->fps);
@@ -421,10 +421,10 @@ static void video_present(void *opaque, const dp_frame *f, const uint32_t *overl
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, p->tex[3]);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        bool resize = p->ov_w != f->width || p->ov_h != f->height;
+        bool resize = p->ov_w != ov_w || p->ov_h != ov_h;
         if (resize || changed || !p->ov_valid) {
             /* 预乘 alpha（内存顺序 R、G、B、A） */
-            size_t n = (size_t)f->width * (size_t)f->height;
+            size_t n = (size_t)ov_w * (size_t)ov_h;
             if (p->ov_pm_size < n * 4) {
                 free(p->ov_pm);
                 p->ov_pm = malloc(n * 4);
@@ -440,11 +440,11 @@ static void video_present(void *opaque, const dp_frame *f, const uint32_t *overl
                     p->ov_pm[i + 3] = (uint8_t)a;
                 }
                 if (resize) {
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f->width, f->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
-                    p->ov_w = f->width;
-                    p->ov_h = f->height;
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ov_w, ov_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
+                    p->ov_w = ov_w;
+                    p->ov_h = ov_h;
                 } else {
-                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ov_w, ov_h, GL_RGBA, GL_UNSIGNED_BYTE, p->ov_pm);
                 }
             }
         }

@@ -2,24 +2,16 @@
 
 #include <dvdnav/dvdnav.h>
 #include <libavcodec/avcodec.h>
-#include <libavfilter/avfilter.h>
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
-#include <libavutil/channel_layout.h>
-#include <libavutil/log.h>
-#include <libavutil/opt.h>
-#include <libswresample/swresample.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dp_av.h"
 #include "dp_spu.h"
 
 #define TAG "DVD"
-#define OUT_RATE 48000
 #define MAX_SPUS 8
-#define LATE_DROP (90 * 120)       /* 晚 120 ms 以上的帧丢掉 */
 #define VQ_BYTES (6 << 20)
 #define AQ_BYTES (1 << 20)
 
@@ -32,13 +24,11 @@ struct dp_dvd {
     dp_platform pf;
     dp_dvd_options opt;
     dvdnav_t *nav;
+    dp_av *av;                /* 解码、显示、音画同步（与蓝光共用） */
 
-    pthread_t nav_th, video_th, audio_th;
+    pthread_t nav_th;
     volatile bool quit;
     bool started;
-    volatile int flush_gen;   /* 每次清空（跳转）加一：等待中的视频 / 音频据此放弃手头的数据 */
-
-    dp_queue vq, aq;
 
     pthread_mutex_t cmd_lock;
     dp_cmd cmds[64];
@@ -71,23 +61,10 @@ struct dp_dvd {
     dp_highlight hl;
     bool spu_show_all;
     uint64_t ov_version;
-
-    /* ---- 时钟 ---- */
-    pthread_mutex_t clk_lock;
-    int64_t written;                 /* 写给音频输出的帧数 */
-    struct { int64_t frame, pts; } amap[64];
-    int amap_n;
-    int64_t last_audio_us;
-    bool sys_valid;
-    int64_t sys_pts, sys_us;
-    bool clk_paused;
-    int64_t pause_us;
-    bool clk_from_audio;             /* 最近一次取时钟用的是音频（统计用） */
-
-    /* ---- 视频线程的唤醒（静止画面时高亮变了要重画）---- */
-    pthread_mutex_t vlock;
-    pthread_cond_t vcond;
-    bool refresh;
+    /* 视频线程用：合成好的叠加层（与视频帧同尺寸）和上次画的内容 */
+    uint32_t *ov_buf;
+    int ov_w, ov_h;
+    uint64_t ov_key;
 
     /* ---- 给界面的状态 ---- */
     pthread_mutex_t st_lock;
@@ -98,89 +75,11 @@ static void emit(dp_dvd *d, int ev, int a1, int a2, const char *text) {
     if (d->pf.on_event) d->pf.on_event(d->pf.opaque, ev, a1, a2, text);
 }
 
-/* ---------------- 时钟 ---------------- */
-
-static void clock_reset(dp_dvd *d) {
-    pthread_mutex_lock(&d->clk_lock);
-    d->amap_n = 0;
-    d->sys_valid = false;
-    d->last_audio_us = 0;
-    pthread_mutex_unlock(&d->clk_lock);
-}
-
-/* 音频线程：写入一段 PCM 之前记下"第 written 帧对应的 PTS"。 */
-static void clock_audio_mark(dp_dvd *d, int64_t pts, int frames) {
-    pthread_mutex_lock(&d->clk_lock);
-    if (pts != DP_NOPTS) {
-        if (d->amap_n == 64) {
-            memmove(d->amap, d->amap + 1, sizeof(d->amap[0]) * 63);
-            d->amap_n = 63;
-        }
-        d->amap[d->amap_n].frame = d->written;
-        d->amap[d->amap_n].pts = pts;
-        d->amap_n++;
-    }
-    d->written += frames;
-    d->last_audio_us = dp_now_us();
-    pthread_mutex_unlock(&d->clk_lock);
-}
-
-/* 当前该显示的 PTS：有音频时以音频为准（已经播放出去的那一帧），否则用系统时钟。 */
-static int64_t clock_now(dp_dvd *d) {
-    pthread_mutex_lock(&d->clk_lock);
-    int64_t now = dp_now_us();
-    int64_t r = DP_NOPTS;
-    bool audio = d->amap_n > 0 && d->last_audio_us != 0 && now - d->last_audio_us < 1500000;
-    if (audio && d->pf.audio_played) {
-        int64_t played = d->pf.audio_played(d->pf.opaque);
-        int i = d->amap_n - 1;
-        while (i > 0 && d->amap[i].frame > played) i--;
-        if (d->amap[i].frame <= played) r = d->amap[i].pts + (played - d->amap[i].frame) * 90000 / OUT_RATE;
-    }
-    d->clk_from_audio = r != DP_NOPTS;
-    if (r == DP_NOPTS && d->sys_valid) {
-        int64_t t = d->clk_paused ? d->pause_us : now;
-        r = d->sys_pts + (t - d->sys_us) * 9 / 100;
-    }
-    pthread_mutex_unlock(&d->clk_lock);
-    return r;
-}
-
-static void clock_anchor(dp_dvd *d, int64_t pts) {
-    pthread_mutex_lock(&d->clk_lock);
-    d->sys_pts = pts;
-    d->sys_us = dp_now_us();
-    d->sys_valid = true;
-    pthread_mutex_unlock(&d->clk_lock);
-}
-
-static void clock_pause(dp_dvd *d, bool pause) {
-    pthread_mutex_lock(&d->clk_lock);
-    int64_t now = dp_now_us();
-    if (pause && !d->clk_paused) {
-        d->pause_us = now;
-    } else if (!pause && d->clk_paused) {
-        d->sys_us += now - d->pause_us;
-    }
-    d->clk_paused = pause;
-    pthread_mutex_unlock(&d->clk_lock);
-}
-
-static bool clock_paused(dp_dvd *d) {
-    pthread_mutex_lock(&d->clk_lock);
-    bool p = d->clk_paused;
-    pthread_mutex_unlock(&d->clk_lock);
-    return p;
-}
-
 /* ---------------- 叠加层 ---------------- */
 
 static void ov_bump(dp_dvd *d) {
     d->ov_version++;
-    pthread_mutex_lock(&d->vlock);
-    d->refresh = true;
-    pthread_cond_broadcast(&d->vcond);
-    pthread_mutex_unlock(&d->vlock);
+    if (d->av) dp_av_refresh(d->av);
 }
 
 static void ov_clear_spus(dp_dvd *d) {
@@ -241,516 +140,22 @@ static bool ov_compose(dp_dvd *d, int64_t pts, uint32_t *buf, int w, int h, uint
     return has;
 }
 
-/* ---------------- 视频线程 ---------------- */
-
-typedef struct {
-    const AVCodec *codec;
-    AVCodecContext *ctx;
-    AVCodecParserContext *parser;
-    AVPacket *pkt;
-    AVFrame *frame, *filt, *last;
-    AVFilterGraph *graph;
-    AVFilterContext *bsrc, *bsink;
-    int g_w, g_h, g_fmt;
-    AVRational g_sar;
-    uint32_t *overlay;
-    int ov_w, ov_h;
-    uint64_t ov_key;
-    bool ov_has;
-    bool need_first;
-    int64_t last_pts;
-    double out_fps;              /* 这一帧的输出帧率（给平台挑屏幕刷新率） */
-    /* 每 10 秒一次的播放统计 */
-    int64_t st_start_us, st_last_present_us, st_max_gap_us, st_max_late_us, st_decode_max_us;
-    int st_shown, st_dropped, st_late;
-    int64_t st_xruns0;
-    uint64_t st_read_us0, st_upcalls0;
-} vstate;
-
-static void v_reset_codec(vstate *v) {
-    if (v->ctx) avcodec_flush_buffers(v->ctx);
-    if (v->parser) av_parser_close(v->parser);
-    v->parser = av_parser_init(AV_CODEC_ID_MPEG2VIDEO);
-    if (v->graph) avfilter_graph_free(&v->graph);
-    v->bsrc = v->bsink = NULL;
-}
-
-static int v_build_graph(vstate *v, const AVFrame *f) {
-    if (v->graph) avfilter_graph_free(&v->graph);
-    v->graph = avfilter_graph_alloc();
-    if (!v->graph) return -1;
-    char args[256];
-    AVRational sar = f->sample_aspect_ratio.num ? f->sample_aspect_ratio : (AVRational){1, 1};
-    snprintf(args, sizeof(args), "video_size=%dx%d:pix_fmt=%d:time_base=1/90000:pixel_aspect=%d/%d",
-             f->width, f->height, f->format, sar.num, sar.den);
-    int r = avfilter_graph_create_filter(&v->bsrc, avfilter_get_by_name("buffer"), "in", args, NULL, v->graph);
-    if (r >= 0) r = avfilter_graph_create_filter(&v->bsink, avfilter_get_by_name("buffersink"), "out", NULL, NULL, v->graph);
-    AVFilterContext *bw = NULL;
-    if (r >= 0) r = avfilter_graph_create_filter(&bw, avfilter_get_by_name("bwdif"), "deint", "mode=send_field:parity=auto:deint=interlaced", NULL, v->graph);
-    AVFilterContext *fmt = NULL;
-    if (r >= 0) r = avfilter_graph_create_filter(&fmt, avfilter_get_by_name("format"), "fmt", "pix_fmts=yuv420p", NULL, v->graph);
-    if (r >= 0) r = avfilter_link(v->bsrc, 0, bw, 0);
-    if (r >= 0) r = avfilter_link(bw, 0, fmt, 0);
-    if (r >= 0) r = avfilter_link(fmt, 0, v->bsink, 0);
-    if (r >= 0) r = avfilter_graph_config(v->graph, NULL);
-    if (r < 0) {
-        dp_log(DP_LOG_WARN, TAG, "去隔行滤镜建不起来（%d），不去隔行", r);
-        avfilter_graph_free(&v->graph);
-        v->bsrc = v->bsink = NULL;
-        return -1;
+/* 视频线程每帧调用（dp_av 的叠加层回调）：DVD 的字幕 / 菜单高亮合成到和视频帧一样大的 RGBA。 */
+static bool dvd_overlay(void *owner, int64_t pts, int fw, int fh, const uint32_t **rgba, int *w, int *h, bool *changed) {
+    dp_dvd *d = owner;
+    if (fw != d->ov_w || fh != d->ov_h) {
+        free(d->ov_buf);
+        d->ov_buf = malloc((size_t)fw * (size_t)fh * 4);
+        d->ov_w = d->ov_buf ? fw : 0;
+        d->ov_h = d->ov_buf ? fh : 0;
+        d->ov_key = (uint64_t)-1;
     }
-    v->g_w = f->width;
-    v->g_h = f->height;
-    v->g_fmt = f->format;
-    v->g_sar = sar;
-    return 0;
-}
-
-static void v_present(dp_dvd *d, vstate *v, AVFrame *f, bool force);
-
-/*
- * 视频线程空着（队列没数据、暂停、等时间到）时：让平台处理窗口更换（界面的 Surface 销毁 / 重建），
- * 界面要求重画（回到播放界面、叠加层变了）时把上一帧再画一次。
- */
-static void v_idle(dp_dvd *d, vstate *v) {
-    if (d->pf.video_idle) d->pf.video_idle(d->pf.opaque);
-    pthread_mutex_lock(&d->vlock);
-    bool refresh = d->refresh;
-    d->refresh = false;
-    pthread_mutex_unlock(&d->vlock);
-    if (refresh && v->last->data[0]) v_present(d, v, v->last, true);
-}
-
-/*
- * 按时钟等到该显示的时候；返回 false 表示太晚了要丢掉，或者要退出 / 清空了。
- * 提前 PRESENT_LEAD 交出去，同时告诉平台这一帧应该在什么时刻显示（*present_ns），由系统对准屏幕刷新，
- * 比"到点再画"更均匀（屏幕 60 / 120 / 144 Hz 时都一样）。
- */
-#define PRESENT_LEAD (90 * 12)
-static bool v_wait(dp_dvd *d, vstate *v, int64_t pts, int64_t *present_ns) {
-    *present_ns = 0;
-    if (!d->pf.realtime) return true;
-    int gen = d->flush_gen;
-    for (;;) {
-        if (d->quit || d->flush_gen != gen) return false;
-        if (clock_paused(d)) {
-            v_idle(d, v);
-            dp_sleep_us(10000);
-            continue;
-        }
-        int64_t now = clock_now(d);
-        if (now == DP_NOPTS || pts == DP_NOPTS) {
-            if (pts != DP_NOPTS) clock_anchor(d, pts);
-            return true;
-        }
-        int64_t diff = pts - now;
-        if (diff <= PRESENT_LEAD) {
-            if (-diff > LATE_DROP && !v->need_first && !d->in_still) return false;
-            /* 跳转后、或者音频时钟远远落后（例如刚开始）时，以这一帧重新对齐系统时钟 */
-            if (-diff > 90 * 3000) clock_anchor(d, pts);
-            if (diff > 0) *present_ns = dp_now_us() * 1000 + diff * 100000 / 9;
-            if (-diff > 90 * 20) {
-                v->st_late++;
-                if (-diff * 100 / 9 > v->st_max_late_us) v->st_max_late_us = -diff * 100 / 9;
-            }
-            return true;
-        }
-        if (diff > 90 * 2000) {
-            /* 差得太远（时间轴不连续），别傻等：重新对齐 */
-            clock_anchor(d, pts);
-            return true;
-        }
-        int64_t us = diff * 100 / 9;
-        if (us > 10000) {
-            v_idle(d, v);
-            us = 10000;
-        }
-        dp_sleep_us(us);
-    }
-}
-
-/* 每 10 秒把播放统计写进日志（查卡顿用）。 */
-static void v_stats(dp_dvd *d, vstate *v, int64_t now_us) {
-    if (v->st_start_us == 0) {
-        v->st_start_us = now_us;
-        v->st_xruns0 = d->pf.audio_xruns ? d->pf.audio_xruns(d->pf.opaque) : 0;
-        v->st_read_us0 = d->src->read_us;
-        v->st_upcalls0 = d->src->upcalls;
-        return;
-    }
-    int64_t span = now_us - v->st_start_us;
-    if (span < 10000000) return;
-    int64_t xr = d->pf.audio_xruns ? d->pf.audio_xruns(d->pf.opaque) : 0;
-    dp_log(DP_LOG_INFO, TAG,
-           "播放统计（%.0f 秒）：显示 %d 帧（%.1f 帧/秒，输出 %.2f），丢 %d 帧，晚到 20 ms 以上 %d 帧（最晚 %lld ms），相邻两帧最长隔 %lld ms，"
-           "解码一帧最长 %lld ms；视频队列 %zu KB，音频队列 %zu KB；时钟：%s；音频欠载 %lld 次；读盘 %llu 次共 %llu ms（最长一次 %llu ms）",
-           span / 1e6, v->st_shown, v->st_shown * 1e6 / span, v->out_fps, v->st_dropped, v->st_late, (long long)(v->st_max_late_us / 1000),
-           (long long)(v->st_max_gap_us / 1000), (long long)(v->st_decode_max_us / 1000), dp_queue_bytes(&d->vq) / 1024, dp_queue_bytes(&d->aq) / 1024,
-           d->clk_from_audio ? "音频" : "系统", (long long)(xr - v->st_xruns0), (unsigned long long)(d->src->upcalls - v->st_upcalls0),
-           (unsigned long long)((d->src->read_us - v->st_read_us0) / 1000), (unsigned long long)(d->src->read_max_us / 1000));
-    d->src->read_max_us = 0;
-    v->st_start_us = now_us;
-    v->st_xruns0 = xr;
-    v->st_read_us0 = d->src->read_us;
-    v->st_upcalls0 = d->src->upcalls;
-    v->st_shown = v->st_dropped = v->st_late = 0;
-    v->st_max_gap_us = v->st_max_late_us = v->st_decode_max_us = 0;
-}
-
-static void v_present(dp_dvd *d, vstate *v, AVFrame *f, bool force) {
-    int64_t pts = f->pts;
-    int64_t present_ns = 0;
-    if (!force && !v_wait(d, v, pts, &present_ns)) {
-        pthread_mutex_lock(&d->st_lock);
-        d->st.frames_dropped++;
-        pthread_mutex_unlock(&d->st_lock);
-        v->st_dropped++;
-        return;
-    }
-    if (f->width != v->ov_w || f->height != v->ov_h) {
-        free(v->overlay);
-        v->overlay = malloc((size_t)f->width * (size_t)f->height * 4);
-        v->ov_w = f->width;
-        v->ov_h = f->height;
-        v->ov_key = (uint64_t)-1;
-    }
-    bool changed = false;
-    if (v->overlay) v->ov_has = ov_compose(d, pts, v->overlay, f->width, f->height, &v->ov_key, &changed);
-    dp_frame df = {
-        .width = f->width, .height = f->height,
-        .sar_num = f->sample_aspect_ratio.num ? f->sample_aspect_ratio.num : 1,
-        .sar_den = f->sample_aspect_ratio.num ? f->sample_aspect_ratio.den : 1,
-        .pts = pts,
-        .plane = {f->data[0], f->data[1], f->data[2]},
-        .stride = {f->linesize[0], f->linesize[1], f->linesize[2]},
-        .fps = v->out_fps,
-        .present_ns = present_ns,
-    };
-    if (d->pf.video_present) d->pf.video_present(d->pf.opaque, &df, v->ov_has ? v->overlay : NULL, changed);
-    if (!force && d->pf.realtime) {
-        int64_t now_us = dp_now_us();
-        if (v->st_last_present_us && now_us - v->st_last_present_us > v->st_max_gap_us && !d->in_still && !clock_paused(d)) {
-            v->st_max_gap_us = now_us - v->st_last_present_us;
-        }
-        v->st_last_present_us = now_us;
-        v->st_shown++;
-        v_stats(d, v, now_us);
-    }
-    if (v->last != f) {
-        av_frame_unref(v->last);
-        av_frame_ref(v->last, f);
-    }
-    pthread_mutex_lock(&d->st_lock);
-    d->st.frames_shown++;
-    d->st.video_w = f->width;
-    d->st.video_h = f->height;
-    d->st.clock_pts = pts;
-    pthread_mutex_unlock(&d->st_lock);
-    if (v->need_first) {
-        v->need_first = false;
-        emit(d, DP_EV_FIRST_FRAME, f->width, f->height, NULL);
-    }
-}
-
-/* 解码出来的一帧：要去隔行就过滤镜（每场一帧，时间基是 1/180000），然后显示。 */
-static void v_output(dp_dvd *d, vstate *v, AVFrame *f, bool drain) {
-    if (f->pts == AV_NOPTS_VALUE) f->pts = f->best_effort_timestamp;
-    if (f->pts == AV_NOPTS_VALUE && v->last_pts != DP_NOPTS) f->pts = v->last_pts + 3003;
-    if (f->pts != AV_NOPTS_VALUE) v->last_pts = f->pts;
-    bool interlaced = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
-    double fps = v->ctx->framerate.num > 0 && v->ctx->framerate.den > 0 ? av_q2d(v->ctx->framerate) : 0;
-    v->out_fps = fps;
-    if (d->opt.deinterlace && interlaced && f->format == AV_PIX_FMT_YUV420P) {
-        if (!v->graph || f->width != v->g_w || f->height != v->g_h || f->format != v->g_fmt) v_build_graph(v, f);
-        if (v->graph && av_buffersrc_add_frame_flags(v->bsrc, f, AV_BUFFERSRC_FLAG_KEEP_REF) >= 0) {
-            v->out_fps = fps * 2;
-            AVRational tb = av_buffersink_get_time_base(v->bsink);
-            while (av_buffersink_get_frame(v->bsink, v->filt) >= 0) {
-                if (v->filt->pts != AV_NOPTS_VALUE) v->filt->pts = av_rescale_q(v->filt->pts, tb, (AVRational){1, 90000});
-                v_present(d, v, v->filt, drain);
-                av_frame_unref(v->filt);
-            }
-            return;
-        }
-    }
-    v_present(d, v, f, drain);
-}
-
-static void v_decode(dp_dvd *d, vstate *v, const uint8_t *data, int size, int64_t pts, bool drain) {
-    if (drain) {
-        avcodec_send_packet(v->ctx, NULL);
-    } else {
-        int64_t ipts = pts == DP_NOPTS ? AV_NOPTS_VALUE : pts;
-        while (size > 0) {
-            uint8_t *out = NULL;
-            int out_size = 0;
-            int used = av_parser_parse2(v->parser, v->ctx, &out, &out_size, data, size, ipts, ipts, 0);
-            if (used < 0) break;
-            data += used;
-            size -= used;
-            ipts = AV_NOPTS_VALUE;
-            if (out_size <= 0) continue;
-            v->pkt->data = out;
-            v->pkt->size = out_size;
-            v->pkt->pts = v->parser->pts;
-            v->pkt->dts = v->parser->dts;
-            /* 统计解码耗时（不含等待显示） */
-            int64_t t0 = dp_now_us();
-            if (avcodec_send_packet(v->ctx, v->pkt) < 0) continue;
-            for (;;) {
-                int r = avcodec_receive_frame(v->ctx, v->frame);
-                int64_t took = dp_now_us() - t0;
-                if (took > v->st_decode_max_us) v->st_decode_max_us = took;
-                if (r < 0) break;
-                v_output(d, v, v->frame, false);
-                av_frame_unref(v->frame);
-                t0 = dp_now_us();
-            }
-        }
-        return;
-    }
-    while (avcodec_receive_frame(v->ctx, v->frame) >= 0) {
-        v_output(d, v, v->frame, true);
-        av_frame_unref(v->frame);
-    }
-    if (v->graph) {
-        if (av_buffersrc_add_frame(v->bsrc, NULL) < 0) dp_log(DP_LOG_DEBUG, TAG, "滤镜排空失败");
-        AVRational tb = av_buffersink_get_time_base(v->bsink);
-        while (av_buffersink_get_frame(v->bsink, v->filt) >= 0) {
-            if (v->filt->pts != AV_NOPTS_VALUE) v->filt->pts = av_rescale_q(v->filt->pts, tb, (AVRational){1, 90000});
-            v_present(d, v, v->filt, true);
-            av_frame_unref(v->filt);
-        }
-    }
-    /* 排空之后解码器要重置才能接着解 */
-    v_reset_codec(v);
-}
-
-static void *video_thread(void *arg) {
-    dp_dvd *d = arg;
-    vstate v = {0};
-    v.codec = avcodec_find_decoder(AV_CODEC_ID_MPEG2VIDEO);
-    v.ctx = avcodec_alloc_context3(v.codec);
-    v.ctx->pkt_timebase = (AVRational){1, 90000};
-    v.ctx->thread_count = 2;
-    dp_thread_priority(-4, "视频");
-    if (avcodec_open2(v.ctx, v.codec, NULL) < 0) {
-        emit(d, DP_EV_ERROR, 0, 0, "MPEG-2 解码器打不开");
-        return NULL;
-    }
-    v.pkt = av_packet_alloc();
-    v.frame = av_frame_alloc();
-    v.filt = av_frame_alloc();
-    v.last = av_frame_alloc();
-    v.parser = av_parser_init(AV_CODEC_ID_MPEG2VIDEO);
-    v.need_first = true;
-    v.last_pts = DP_NOPTS;
-    v.ov_key = (uint64_t)-1;
-    while (!d->quit) {
-        dp_packet *p = dp_queue_get(&d->vq, 20);
-        if (!p) {
-            /* 没有新帧（静止画面、暂停）：窗口变了、叠加层变了就把最后一帧重画一次 */
-            v_idle(d, &v);
-            continue;
-        }
-        switch (p->kind) {
-            case DP_PKT_FLUSH:
-                v_reset_codec(&v);
-                v.last_pts = DP_NOPTS;
-                v.need_first = true;
-                break;
-            case DP_PKT_DRAIN:
-                v_decode(d, &v, NULL, 0, DP_NOPTS, true);
-                break;
-            case DP_PKT_DATA:
-                v_decode(d, &v, p->data, p->size, p->pts, false);
-                break;
-            default:
-                break;
-        }
-        free(p);
-    }
-    if (d->pf.video_exit) d->pf.video_exit(d->pf.opaque);
-    if (v.graph) avfilter_graph_free(&v.graph);
-    av_parser_close(v.parser);
-    av_frame_free(&v.frame);
-    av_frame_free(&v.filt);
-    av_frame_free(&v.last);
-    av_packet_free(&v.pkt);
-    avcodec_free_context(&v.ctx);
-    free(v.overlay);
-    return NULL;
-}
-
-/* ---------------- 音频线程 ---------------- */
-
-typedef struct {
-    int stream;   /* 当前解码器对应的流号 */
-    AVCodecContext *ctx;
-    AVCodecParserContext *parser;
-    AVPacket *pkt;
-    AVFrame *frame;
-    SwrContext *swr;
-    AVChannelLayout swr_in;
-    int swr_rate, swr_fmt;
-    int16_t *out;
-    int out_cap;
-    bool opened;
-} astate;
-
-static enum AVCodecID audio_codec(int stream) {
-    if (stream >= 0x80 && stream <= 0x87) return AV_CODEC_ID_AC3;
-    if (stream >= 0x88 && stream <= 0x8F) return AV_CODEC_ID_DTS;
-    if (stream >= 0xA0 && stream <= 0xA7) return AV_CODEC_ID_PCM_DVD;
-    if (stream >= 0xC0 && stream <= 0xDF) return AV_CODEC_ID_MP2;
-    return AV_CODEC_ID_NONE;
-}
-
-static void a_close(astate *a) {
-    if (a->parser) av_parser_close(a->parser);
-    a->parser = NULL;
-    avcodec_free_context(&a->ctx);
-    swr_free(&a->swr);
-    av_channel_layout_uninit(&a->swr_in);
-    a->stream = -1;
-}
-
-static bool a_open(dp_dvd *d, astate *a, int stream) {
-    a_close(a);
-    enum AVCodecID id = audio_codec(stream);
-    const AVCodec *c = avcodec_find_decoder(id);
-    if (!c) return false;
-    a->ctx = avcodec_alloc_context3(c);
-    a->ctx->pkt_timebase = (AVRational){1, 90000};
-    if (id == AV_CODEC_ID_MP2) a->ctx->codec_id = AV_CODEC_ID_MP2;
-    if (avcodec_open2(a->ctx, c, NULL) < 0) {
-        avcodec_free_context(&a->ctx);
-        return false;
-    }
-    if (id != AV_CODEC_ID_PCM_DVD) a->parser = av_parser_init(id == AV_CODEC_ID_MP2 ? AV_CODEC_ID_MP2 : id);
-    a->stream = stream;
-    dp_log(DP_LOG_INFO, TAG, "音频解码器：%s（流 %02Xh）", c->name, stream);
-    return true;
-}
-
-static void a_play(dp_dvd *d, astate *a, AVFrame *f) {
-    if (!a->opened) {
-        if (d->pf.audio_open && d->pf.audio_open(d->pf.opaque, OUT_RATE, 2) == 0) a->opened = true;
-        else return;
-    }
-    if (!a->swr || av_channel_layout_compare(&a->swr_in, &f->ch_layout) || a->swr_rate != f->sample_rate || a->swr_fmt != f->format) {
-        swr_free(&a->swr);
-        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-        if (swr_alloc_set_opts2(&a->swr, &stereo, AV_SAMPLE_FMT_S16, OUT_RATE, &f->ch_layout, f->format, f->sample_rate, 0, NULL) < 0 ||
-            swr_init(a->swr) < 0) {
-            swr_free(&a->swr);
-            return;
-        }
-        av_channel_layout_uninit(&a->swr_in);
-        av_channel_layout_copy(&a->swr_in, &f->ch_layout);
-        a->swr_rate = f->sample_rate;
-        a->swr_fmt = f->format;
-    }
-    int max_out = swr_get_out_samples(a->swr, f->nb_samples) + 32;
-    if (max_out > a->out_cap) {
-        free(a->out);
-        a->out = malloc((size_t)max_out * 4);
-        a->out_cap = a->out ? max_out : 0;
-        if (!a->out) return;
-    }
-    uint8_t *outp[1] = {(uint8_t *)a->out};
-    int n = swr_convert(a->swr, outp, max_out, (const uint8_t **)f->extended_data, f->nb_samples);
-    if (n <= 0) return;
-    int64_t pts = f->pts != AV_NOPTS_VALUE ? f->pts : DP_NOPTS;
-    clock_audio_mark(d, pts, n);
-    if (d->pf.audio_write) {
-        int done = 0;
-        int gen = d->flush_gen;
-        while (done < n && !d->quit && d->flush_gen == gen) {
-            int w = d->pf.audio_write(d->pf.opaque, a->out + done * 2, n - done);
-            if (w < 0) break;
-            /* 暂停中写不进去：等着，不能丢（丢了音频时钟就和画面错开了） */
-            if (w == 0) {
-                dp_sleep_us(5000);
-                continue;
-            }
-            done += w;
-        }
-    }
-    pthread_mutex_lock(&d->st_lock);
-    d->st.audio_frames += (uint64_t)n;
-    pthread_mutex_unlock(&d->st_lock);
-}
-
-static void a_decode(dp_dvd *d, astate *a, dp_packet *p) {
-    if (p->stream != a->stream && !a_open(d, a, p->stream)) return;
-    const uint8_t *data = p->data;
-    int size = p->size;
-    int64_t ipts = p->pts == DP_NOPTS ? AV_NOPTS_VALUE : p->pts;
-    if (!a->parser) {
-        a->pkt->data = (uint8_t *)data;
-        a->pkt->size = size;
-        a->pkt->pts = ipts;
-        if (avcodec_send_packet(a->ctx, a->pkt) >= 0) {
-            while (avcodec_receive_frame(a->ctx, a->frame) >= 0) {
-                a_play(d, a, a->frame);
-                av_frame_unref(a->frame);
-            }
-        }
-        return;
-    }
-    while (size > 0) {
-        uint8_t *out = NULL;
-        int out_size = 0;
-        int used = av_parser_parse2(a->parser, a->ctx, &out, &out_size, data, size, ipts, ipts, 0);
-        if (used < 0) break;
-        data += used;
-        size -= used;
-        ipts = AV_NOPTS_VALUE;
-        if (out_size <= 0) continue;
-        a->pkt->data = out;
-        a->pkt->size = out_size;
-        a->pkt->pts = a->parser->pts;
-        if (avcodec_send_packet(a->ctx, a->pkt) < 0) continue;
-        while (avcodec_receive_frame(a->ctx, a->frame) >= 0) {
-            a_play(d, a, a->frame);
-            av_frame_unref(a->frame);
-        }
-    }
-}
-
-static void *audio_thread(void *arg) {
-    dp_dvd *d = arg;
-    astate a = {0};
-    a.stream = -1;
-    dp_thread_priority(-16, "音频");
-    a.pkt = av_packet_alloc();
-    a.frame = av_frame_alloc();
-    while (!d->quit) {
-        dp_packet *p = dp_queue_get(&d->aq, 50);
-        if (!p) continue;
-        if (p->kind == DP_PKT_FLUSH) {
-            if (a.ctx) avcodec_flush_buffers(a.ctx);
-            if (a.parser) {
-                av_parser_close(a.parser);
-                a.parser = av_parser_init(audio_codec(a.stream) == AV_CODEC_ID_MP2 ? AV_CODEC_ID_MP2 : audio_codec(a.stream));
-            }
-            if (a.opened && d->pf.audio_flush) d->pf.audio_flush(d->pf.opaque);
-            pthread_mutex_lock(&d->clk_lock);
-            d->amap_n = 0;
-            d->written = 0;
-            pthread_mutex_unlock(&d->clk_lock);
-        } else if (p->kind == DP_PKT_DATA) {
-            a_decode(d, &a, p);
-        }
-        free(p);
-    }
-    if (a.opened && d->pf.audio_close) d->pf.audio_close(d->pf.opaque);
-    a_close(&a);
-    av_frame_free(&a.frame);
-    av_packet_free(&a.pkt);
-    free(a.out);
-    return NULL;
+    if (!d->ov_buf) return false;
+    bool has = ov_compose(d, pts, d->ov_buf, fw, fh, &d->ov_key, changed);
+    *rgba = d->ov_buf;
+    *w = fw;
+    *h = fh;
+    return has;
 }
 
 /* ---------------- 导航线程 ---------------- */
@@ -759,10 +164,13 @@ static int64_t parse_pts(const uint8_t *p) {
     return ((int64_t)((p[0] >> 1) & 7) << 30) | ((int64_t)p[1] << 22) | ((int64_t)(p[2] >> 1) << 15) | ((int64_t)p[3] << 7) | (p[4] >> 1);
 }
 
-static void push(dp_dvd *d, dp_queue *q, int stream, int64_t pts, const uint8_t *data, int len) {
-    if (len <= 0) return;
-    dp_packet *p = dp_packet_new(DP_PKT_DATA, stream, pts, data, len);
-    if (p) dp_queue_put(q, p, true);
+/* DVD 音频子流号 → FFmpeg 解码器。 */
+static int audio_codec(int code) {
+    if (code >= 0x80 && code <= 0x87) return AV_CODEC_ID_AC3;
+    if (code >= 0x88 && code <= 0x8F) return AV_CODEC_ID_DTS;
+    if (code >= 0xA0 && code <= 0xA7) return AV_CODEC_ID_PCM_DVD;
+    if (code >= 0xC0 && code <= 0xDF) return AV_CODEC_ID_MP2;
+    return AV_CODEC_ID_NONE;
 }
 
 static void handle_spu(dp_dvd *d, int phys, const uint8_t *data, int len, int64_t pts) {
@@ -829,33 +237,27 @@ static void demux_pack(dp_dvd *d, const uint8_t *b, int len) {
         if (q >= end) continue;
         int64_t t = pts == DP_NOPTS ? DP_NOPTS : pts + d->ts_offset;
         if (id >= 0xE0 && id <= 0xEF) {
-            push(d, &d->vq, id, t, b + q, end - q);
+            dp_av_video(d->av, AV_CODEC_ID_MPEG2VIDEO, t, DP_NOPTS, b + q, end - q);
         } else if (id >= 0xC0 && id <= 0xDF) {
-            if (audio_selected(d, id)) push(d, &d->aq, id, t, b + q, end - q);
+            if (audio_selected(d, id)) dp_av_audio(d->av, id, audio_codec(id), t, b + q, end - q);
         } else if (id == 0xBD) {
             int sub = b[q];
             if (sub >= 0x20 && sub <= 0x3F) {
                 handle_spu(d, sub & 0x1F, b + q + 1, end - q - 1, t);
             } else if (sub >= 0x80 && sub <= 0xAF) {
                 /* 子流号 + 帧数 + 首个访问单元指针，之后是数据（LPCM 还带 3 字节头，留给解码器） */
-                if (audio_selected(d, sub) && q + 4 < end) push(d, &d->aq, sub, t, b + q + 4, end - q - 4);
+                if (audio_selected(d, sub) && q + 4 < end) dp_av_audio(d->av, sub, audio_codec(sub), t, b + q + 4, end - q - 4);
             }
         }
     }
 }
 
 static void flush_all(dp_dvd *d, const char *why) {
-    d->flush_gen++;
-    dp_queue_clear(&d->vq);
-    dp_queue_clear(&d->aq);
-    dp_queue_put(&d->vq, dp_packet_new(DP_PKT_FLUSH, 0, DP_NOPTS, NULL, 0), false);
-    dp_queue_put(&d->aq, dp_packet_new(DP_PKT_FLUSH, 0, DP_NOPTS, NULL, 0), false);
+    dp_av_flush(d->av, why);
     dp_spu_asm_reset(&d->spu_asm);
     ov_clear_spus(d);
-    clock_reset(d);
     d->have_vobu = false;
     d->in_still = false;
-    dp_log(DP_LOG_DEBUG, TAG, "清空解码器（%s）", why);
 }
 
 static void update_streams_state(dp_dvd *d) {
@@ -1012,13 +414,11 @@ static void exec_command(dp_dvd *d, dp_cmd c) {
         case DP_CMD_ANGLE: r = dvdnav_angle_change(d->nav, c.a1); break;
         case DP_CMD_PAUSE:
             d->paused = true;
-            clock_pause(d, true);
-            if (d->pf.audio_pause) d->pf.audio_pause(d->pf.opaque, true);
+            dp_av_pause(d->av, true);
             break;
         case DP_CMD_RESUME:
             d->paused = false;
-            clock_pause(d, false);
-            if (d->pf.audio_pause) d->pf.audio_pause(d->pf.opaque, false);
+            dp_av_pause(d->av, false);
             break;
         case DP_CMD_GO_UP: r = dvdnav_go_up(d->nav); break;
         case DP_CMD_STILL_SKIP: r = dvdnav_still_skip(d->nav); break;
@@ -1050,11 +450,7 @@ static void process_commands(dp_dvd *d) {
 
 /* 等解码器把排队的数据处理完（WAIT 事件、静止画面之前）。 */
 static void wait_drained(dp_dvd *d, int max_ms) {
-    int64_t until = dp_now_us() + (int64_t)max_ms * 1000;
-    while (!d->quit && dp_now_us() < until) {
-        if (dp_queue_count(&d->vq) == 0 && dp_queue_count(&d->aq) == 0) break;
-        dp_sleep_us(5000);
-    }
+    dp_av_wait_drained(d->av, max_ms);
 }
 
 static void *nav_thread(void *arg) {
@@ -1093,7 +489,10 @@ static void *nav_thread(void *arg) {
         }
         switch (event) {
             case DVDNAV_BLOCK_OK:
-                d->in_still = false;
+                if (d->in_still) {
+                    d->in_still = false;
+                    dp_av_set_still(d->av, false);
+                }
                 demux_pack(d, buf, len);
                 break;
             case DVDNAV_NOP:
@@ -1104,7 +503,8 @@ static void *nav_thread(void *arg) {
                     d->in_still = true;
                     d->still_len = ev->length;
                     d->still_since_us = dp_now_us();
-                    dp_queue_put(&d->vq, dp_packet_new(DP_PKT_DRAIN, 0, DP_NOPTS, NULL, 0), true);
+                    dp_av_set_still(d->av, true);
+                    dp_av_drain(d->av);
                     dp_log(DP_LOG_INFO, TAG, "静止画面：%s", ev->length == 0xFF ? "一直停住，等按键" : "定时");
                     update_position_state(d);
                     emit(d, DP_EV_STILL, ev->length, 0, NULL);
@@ -1165,8 +565,7 @@ static void *nav_thread(void *arg) {
                     d->st.audio_code = code;
                     pthread_mutex_unlock(&d->st_lock);
                     emit(d, DP_EV_STATE, 0, 0, NULL);
-                    dp_queue_clear(&d->aq);
-                    dp_queue_put(&d->aq, dp_packet_new(DP_PKT_FLUSH, 0, DP_NOPTS, NULL, 0), false);
+                    dp_av_flush_audio(d->av);
                 }
                 break;
             }
@@ -1227,38 +626,12 @@ static void dvdnav_log(void *priv, dvdnav_logger_level_t level, const char *fmt,
     dp_log(level == DVDNAV_LOGGER_LEVEL_ERROR ? DP_LOG_WARN : DP_LOG_DEBUG, "DVDNAV", "%s", buf);
 }
 
-/* FFmpeg 的错误进日志（坏扇区补零后解码器会连续报错，限流：每 10 秒最多 20 条） */
-static void av_log_cb(void *avcl, int level, const char *fmt, va_list ap) {
-    (void)avcl;
-    if (level > AV_LOG_ERROR) return;
-    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    static int64_t window_us;
-    static int count, dropped;
-    pthread_mutex_lock(&lock);
-    int64_t now = dp_now_us();
-    if (now - window_us > 10000000) {
-        if (dropped) dp_log(DP_LOG_WARN, "FFMPEG", "（另有 %d 条解码错误没有记录）", dropped);
-        window_us = now;
-        count = dropped = 0;
-    }
-    bool emit_it = count++ < 20;
-    if (!emit_it) dropped++;
-    pthread_mutex_unlock(&lock);
-    if (!emit_it) return;
-    char buf[512];
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    size_t n = strlen(buf);
-    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
-    dp_log(DP_LOG_WARN, "FFMPEG", "%s", buf);
-}
-
 static int stream_seek(void *s, uint64_t pos) { return dp_source_seek(s, pos); }
 static int stream_read(void *s, void *buf, int len) { return dp_source_read(s, buf, len); }
 
 dp_dvd *dp_dvd_open(dp_source *src, const dp_platform *pf, const dp_dvd_options *opt, char *err, int errlen) {
     dp_dvd *d = calloc(1, sizeof(*d));
     if (!d) return NULL;
-    av_log_set_callback(av_log_cb);
     d->src = src;
     d->pf = *pf;
     d->opt = *opt;
@@ -1269,12 +642,17 @@ dp_dvd *dp_dvd_open(dp_source *src, const dp_platform *pf, const dp_dvd_options 
     dp_spu_asm_reset(&d->spu_asm);
     pthread_mutex_init(&d->cmd_lock, NULL);
     pthread_mutex_init(&d->ov_lock, NULL);
-    pthread_mutex_init(&d->clk_lock, NULL);
-    pthread_mutex_init(&d->vlock, NULL);
-    pthread_cond_init(&d->vcond, NULL);
     pthread_mutex_init(&d->st_lock, NULL);
-    dp_queue_init(&d->vq, VQ_BYTES);
-    dp_queue_init(&d->aq, AQ_BYTES);
+    dp_av_options ao = {
+        .tag = TAG, .deinterlace = opt->deinterlace, .vq_bytes = VQ_BYTES, .aq_bytes = AQ_BYTES,
+        .overlay = dvd_overlay, .owner = d, .src = src,
+    };
+    d->av = dp_av_new(pf, &ao);
+    if (!d->av) {
+        snprintf(err, (size_t)errlen, "内存不足");
+        dp_dvd_close(d);
+        return NULL;
+    }
     for (int i = 0; i < 16; i++) d->clut[i] = 0xFF808080u;
 
     static dvdnav_stream_cb cb = {.pf_seek = stream_seek, .pf_read = stream_read, .pf_readv = NULL};
@@ -1304,10 +682,9 @@ dp_dvd *dp_dvd_open(dp_source *src, const dp_platform *pf, const dp_dvd_options 
 
 int dp_dvd_start(dp_dvd *d) {
     if (d->started) return 0;
-    d->started = true;
-    if (pthread_create(&d->video_th, NULL, video_thread, d) != 0) return -1;
-    if (pthread_create(&d->audio_th, NULL, audio_thread, d) != 0) return -1;
+    if (dp_av_start(d->av) != 0) return -1;
     if (pthread_create(&d->nav_th, NULL, nav_thread, d) != 0) return -1;
+    d->started = true;
     return 0;
 }
 
@@ -1325,36 +702,33 @@ void dp_dvd_get_state(dp_dvd *d, dp_dvd_state *out) {
     *out = d->st;
     out->paused = d->paused;
     pthread_mutex_unlock(&d->st_lock);
-    out->clock_pts = clock_now(d);
+    dp_av_stats as;
+    dp_av_get_stats(d->av, &as);
+    out->frames_shown = as.frames_shown;
+    out->frames_dropped = as.frames_dropped;
+    out->audio_frames = as.audio_frames;
+    out->video_w = as.video_w;
+    out->video_h = as.video_h;
+    out->clock_pts = as.clock_pts;
 }
 
 void dp_dvd_refresh(dp_dvd *d) {
-    pthread_mutex_lock(&d->vlock);
-    d->refresh = true;
-    pthread_cond_broadcast(&d->vcond);
-    pthread_mutex_unlock(&d->vlock);
+    dp_av_refresh(d->av);
 }
 
 void dp_dvd_close(dp_dvd *d) {
     if (!d) return;
     d->quit = true;
-    dp_queue_set_abort(&d->vq, true);
-    dp_queue_set_abort(&d->aq, true);
-    if (d->started) {
-        pthread_join(d->nav_th, NULL);
-        pthread_join(d->video_th, NULL);
-        pthread_join(d->audio_th, NULL);
-    }
+    /* 先让可能卡在队列上的导航线程返回，再停导航线程，最后停解码 / 显示线程 */
+    if (d->av) dp_av_abort(d->av);
+    if (d->started) pthread_join(d->nav_th, NULL);
+    if (d->av) dp_av_free(d->av);
     if (d->nav) dvdnav_close(d->nav);
-    dp_queue_destroy(&d->vq);
-    dp_queue_destroy(&d->aq);
+    free(d->ov_buf);
     for (int i = 0; i < d->spu_count; i++) free(d->spus[i].idx);
     dp_spu_asm_free(&d->spu_asm);
     pthread_mutex_destroy(&d->cmd_lock);
     pthread_mutex_destroy(&d->ov_lock);
-    pthread_mutex_destroy(&d->clk_lock);
-    pthread_mutex_destroy(&d->vlock);
-    pthread_cond_destroy(&d->vcond);
     pthread_mutex_destroy(&d->st_lock);
     free(d);
 }

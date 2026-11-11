@@ -52,15 +52,16 @@ typedef struct {
     dp_dvd *d;
 } host;
 
-static void hv_present(void *o, const dp_frame *f, const uint32_t *ov, bool changed) {
+static void hv_present(void *o, const dp_frame *f, const uint32_t *ov, int ov_w, int ov_h, bool changed) {
     host *h = o;
     (void)changed;
+    (void)f;
     pthread_mutex_lock(&h->lock);
     h->frames++;
-    if (ov) {
+    if (ov && ov_w > 200 && ov_h > 230) {
         h->frames_overlay++;
-        h->px_b1 = ov[130 * f->width + 200];
-        h->px_b2 = ov[230 * f->width + 200];
+        h->px_b1 = ov[130 * ov_w + 200];
+        h->px_b2 = ov[230 * ov_w + 200];
     }
     pthread_mutex_unlock(&h->lock);
 }
