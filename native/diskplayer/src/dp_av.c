@@ -853,6 +853,10 @@ void dp_av_wait_drained(dp_av *d, int max_ms) {
     }
 }
 
+bool dp_av_queues_empty(dp_av *d) {
+    return dp_queue_count(&d->vq) == 0 && dp_queue_count(&d->aq) == 0;
+}
+
 void dp_av_set_still(dp_av *d, bool still) {
     d->in_still = still;
 }

@@ -50,6 +50,8 @@ void dp_av_flush_audio(dp_av *av);
 void dp_av_drain(dp_av *av);
 /* 等队列里的数据处理完（最多 max_ms）。 */
 void dp_av_wait_drained(dp_av *av, int max_ms);
+/* 队列里的数据都处理完了（不阻塞）。 */
+bool dp_av_queues_empty(dp_av *av);
 /* 静止画面期间晚到的帧不丢。 */
 void dp_av_set_still(dp_av *av, bool still);
 

@@ -12,3 +12,12 @@ cc -std=gnu11 -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-unused-para
   -L"$DEPS/lib" -ldvdnav -ldvdread -lavfilter -lswscale -lswresample -lavcodec -lavutil -lpthread -lm -ldl \
   -o "$OUT/dp_host_test"
 "$OUT/dp_host_test" "$OUT/menu_dvd.iso"
+
+# 蓝光
+[ -f "$OUT/test_bd.iso" ] || python3 "$HERE/make_bd.py" "$OUT/test_bd.iso" > "$OUT/make_bd.log" 2>&1
+cc -std=gnu11 -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-unused-parameter -I"$DEPS/include" \
+  "$ROOT/src/dp_core.c" "$ROOT/src/dp_av.c" "$ROOT/src/dp_bd.c" "$HERE/dp_bd_host_test.c" \
+  -L"$DEPS/lib" -lbluray -ludfread -lavfilter -lswscale -lswresample -lavcodec -lavutil -lpthread -lm -ldl \
+  -o "$OUT/dp_bd_host_test"
+"$OUT/dp_bd_host_test" "$OUT/test_bd.iso"
+
